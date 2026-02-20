@@ -51,6 +51,8 @@ class Flow(db.Model):
     updated_at = db.Column(db.DateTime, default=lambda: datetime.utcnow(), onupdate=lambda: datetime.utcnow())
 
     def to_dict(self, include_stats=False):
+        # Always include versions summary so frontend can find draft/published versions
+        all_versions = FlowVersion.query.filter_by(flow_id=self.id).order_by(FlowVersion.version_number.desc()).all()
         data = {
             "id": self.id,
             "name": self.name,
@@ -61,9 +63,10 @@ class Flow(db.Model):
             "is_archived": self.is_archived,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "versions": [{"id": v.id, "status": v.status, "version_number": v.version_number} for v in all_versions],
         }
         if include_stats:
-            version_ids = [v.id for v in FlowVersion.query.filter_by(flow_id=self.id).all()]
+            version_ids = [v.id for v in all_versions]
             sessions = Session.query.filter(Session.flow_version_id.in_(version_ids)).all() if version_ids else []
             completed = [s for s in sessions if s.status == "completed"]
             data["stats"] = {
@@ -136,7 +139,7 @@ class Edge(db.Model):
     flow_version_id = db.Column(db.String(36), db.ForeignKey("flow_versions.id"), nullable=False)
     source_node_id = db.Column(db.String(36), db.ForeignKey("nodes.id"), nullable=False)
     target_node_id = db.Column(db.String(36), db.ForeignKey("nodes.id"), nullable=False)
-    condition_label = db.Column(db.String(255), nullable=False)
+    condition_label = db.Column(db.String(255), nullable=False, default="")
     sort_order = db.Column(db.Integer, default=0)
 
     def to_dict(self):
@@ -613,20 +616,20 @@ def bulk_update_positions(version_id):
 def create_edge(version_id):
     FlowVersion.query.get_or_404(version_id)
     data = request.get_json(silent=True) or {}
-    err = validate_required(data, "source", "target", "condition_label")
+    err = validate_required(data, "source", "target")
     if err:
         return err
     if data["source"] == data["target"]:
         return jsonify({"error": "Source and target nodes cannot be the same"}), 400
     existing = Edge.query.filter_by(
         flow_version_id=version_id, source_node_id=data["source"],
-        target_node_id=data["target"], condition_label=data["condition_label"],
+        target_node_id=data["target"], condition_label=data.get("condition_label", ""),
     ).first()
     if existing:
         return jsonify({"error": "An identical connection already exists"}), 409
     edge = Edge(
         flow_version_id=version_id, source_node_id=data["source"], target_node_id=data["target"],
-        condition_label=data["condition_label"].strip(), sort_order=data.get("sort_order", 0),
+        condition_label=data.get("condition_label", "").strip(), sort_order=data.get("sort_order", 0),
     )
     db.session.add(edge)
     db.session.commit()

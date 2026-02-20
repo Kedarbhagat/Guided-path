@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { Routes, Route, Link, useNavigate, useParams, useLocation } from 'react-router-dom'
+import VisioImportModal from './VisioImportModal'
 
 // ─── API ──────────────────────────────────────────────────────
 const BASE = 'http://localhost:5000/api/v1'
@@ -260,6 +261,7 @@ function Dashboard() {
   const [sort, setSort] = useState('newest')
   const [showArchived, setShowArchived] = useState(false)
   const [archivedFlows, setArchivedFlows] = useState([])
+  const [showVisioImport, setShowVisioImport] = useState(false)
   const { toasts, add: toast } = useToast()
   const navigate = useNavigate()
   const inputRef = useRef(null)
@@ -338,6 +340,17 @@ function Dashboard() {
     <div style={{ height: '100%', overflow: 'auto', padding: '48px 56px' }}>
       <ToastContainer toasts={toasts} />
 
+      {showVisioImport && (
+        <VisioImportModal
+          onClose={() => setShowVisioImport(false)}
+          onImported={({ flowId, versionId, flowName }) => {
+            setShowVisioImport(false)
+            toast(`Flow "${flowName}" imported successfully!`, 'success')
+            load()
+          }}
+        />
+      )}
+
       {/* Header */}
       <div style={{ marginBottom: '32px', display: 'flex', alignItems: 'flex-end', justifyContent: 'space-between' }}>
         <div>
@@ -346,13 +359,21 @@ function Dashboard() {
           </div>
           <h1 style={{ fontSize: '26px', fontWeight: 400, color: 'var(--text)', letterSpacing: '-0.02em' }}>Resolution Flows</h1>
         </div>
-        <button onClick={() => setCreating(true)}
-          style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '9px 18px', background: 'var(--accent)', color: '#fff', borderRadius: '7px', fontSize: '13px', fontWeight: 500, transition: 'opacity 0.15s, transform 0.1s' }}
-          onMouseEnter={e => { e.currentTarget.style.opacity = '0.9'; e.currentTarget.style.transform = 'translateY(-1px)' }}
-          onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}>
-          <span style={{ fontSize: '16px', lineHeight: 1 }}>+</span> New Flow
-          <span style={{ fontFamily: 'var(--mono)', fontSize: '10px', opacity: 0.6, marginLeft: '4px' }}>⌘N</span>
-        </button>
+        <div style={{ display: 'flex', gap: '8px' }}>
+          <button onClick={() => setShowVisioImport(true)}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '9px 18px', background: 'var(--surface)', color: 'var(--text2)', border: '1px solid var(--border)', borderRadius: '7px', fontSize: '13px', fontWeight: 500, transition: 'all 0.15s' }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--accent)'; e.currentTarget.style.color = 'var(--text)' }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text2)' }}>
+            ⬡ Import Visio
+          </button>
+          <button onClick={() => setCreating(true)}
+            style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '9px 18px', background: 'var(--accent)', color: '#fff', borderRadius: '7px', fontSize: '13px', fontWeight: 500, transition: 'opacity 0.15s, transform 0.1s' }}
+            onMouseEnter={e => { e.currentTarget.style.opacity = '0.9'; e.currentTarget.style.transform = 'translateY(-1px)' }}
+            onMouseLeave={e => { e.currentTarget.style.opacity = '1'; e.currentTarget.style.transform = 'translateY(0)' }}>
+            <span style={{ fontSize: '16px', lineHeight: 1 }}>+</span> New Flow
+            <span style={{ fontFamily: 'var(--mono)', fontSize: '10px', opacity: 0.6, marginLeft: '4px' }}>⌘N</span>
+          </button>
+        </div>
       </div>
 
       {/* Search + filters */}
@@ -627,12 +648,22 @@ function FlowCard({ flow, index, onDelete, onDuplicate, toast }) {
               ▶ Run
             </button>
           )}
-          {draftVersion && (
+          {/* Draft-only flow: prominent accent Edit Draft button */}
+          {draftVersion && !hasPublished && (
+            <button onClick={() => navigate(`/build/${flow.id}/${draftVersion.id}`)}
+              style={{ flex: 1, padding: '8px 12px', background: '#1a2a10', color: 'var(--yellow)', border: '1px solid #3a4a10', borderRadius: '6px', fontSize: '12px', fontWeight: 500, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', transition: 'all 0.15s' }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#232f14'; e.currentTarget.style.borderColor = '#5a7a10' }}
+              onMouseLeave={e => { e.currentTarget.style.background = '#1a2a10'; e.currentTarget.style.borderColor = '#3a4a10' }}>
+              ✎ Edit Draft
+            </button>
+          )}
+          {/* Published flow with a draft: secondary edit button */}
+          {draftVersion && hasPublished && (
             <button onClick={() => navigate(`/build/${flow.id}/${draftVersion.id}`)}
               style={{ flex: 1, padding: '8px 12px', background: 'var(--surface2)', color: 'var(--text2)', border: '1px solid var(--border)', borderRadius: '6px', fontSize: '12px', transition: 'border-color 0.15s, color 0.15s' }}
               onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border2)'; e.currentTarget.style.color = 'var(--text)' }}
               onMouseLeave={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text2)' }}>
-              ✎ Edit
+              ✎ Edit draft
             </button>
           )}
           {!draftVersion && hasPublished && (
@@ -1121,6 +1152,7 @@ function FlowBuilder() {
   const [editingNode, setEditingNode] = useState(null)
   const [addingEdge, setAddingEdge] = useState(null)
   const [edgeModal, setEdgeModal] = useState(null)
+  const [editingEdge, setEditingEdge] = useState(null) // { id, label } for rename
   const [deleteConfirm, setDeleteConfirm] = useState(null)
   const [publishModal, setPublishModal] = useState(false)
   const [publishNotes, setPublishNotes] = useState('')
@@ -1282,6 +1314,15 @@ function FlowBuilder() {
       await api.deleteEdge(versionId, edgeId)
       setEdges(prev => prev.filter(e => e.id !== edgeId))
       toast('Connection removed')
+    } catch (e) { toast(e.message, 'error') }
+  }
+
+  async function renameEdge(edgeId, label) {
+    try {
+      await api.updateEdge(versionId, edgeId, { condition_label: label })
+      setEdges(prev => prev.map(e => e.id === edgeId ? { ...e, condition_label: label } : e))
+      setEditingEdge(null)
+      toast('Label updated')
     } catch (e) { toast(e.message, 'error') }
   }
 
@@ -1558,22 +1599,47 @@ function FlowBuilder() {
                 const x2 = tgtPos.x || 0
                 const y2 = (tgtPos.y || 0) + NODE_H / 2
                 const mx = (x1 + x2) / 2, my = (y1 + y2) / 2
+                const hasLabel = edge.condition_label && edge.condition_label.trim()
 
                 return (
                   <g key={edge.id} style={{ pointerEvents: 'all' }}>
                     <path d={`M ${x1} ${y1} C ${mx} ${y1} ${mx} ${y2} ${x2} ${y2}`}
                       fill="none" stroke="var(--border2)" strokeWidth="1.5" markerEnd="url(#arrow)" />
-                    <text x={mx} y={my - 8} textAnchor="middle"
-                      style={{ fontSize: '10px', fill: 'var(--text3)', fontFamily: 'var(--mono)', pointerEvents: 'none' }}>
-                      {edge.condition_label}
-                    </text>
-                    {!isPublished && <>
-                      <circle cx={mx} cy={my + 6} r="9" fill="var(--surface)" stroke="var(--border2)" strokeWidth="1"
-                        style={{ cursor: 'pointer' }}
-                        onClick={e => { e.stopPropagation(); removeEdge(edge.id) }} />
-                      <text x={mx} y={my + 11} textAnchor="middle"
-                        style={{ fontSize: '12px', fill: 'var(--red)', pointerEvents: 'none' }}>×</text>
-                    </>}
+
+                    {/* Clickable label pill — click to edit */}
+                    {!isPublished && (
+                      <g onClick={e => { e.stopPropagation(); setEditingEdge({ id: edge.id, label: edge.condition_label || '' }) }}
+                        style={{ cursor: 'pointer' }}>
+                        <rect x={mx - 32} y={my - 22} width="64" height="18" rx="4"
+                          fill={hasLabel ? 'var(--surface2)' : 'var(--surface)'}
+                          stroke={hasLabel ? 'var(--border2)' : 'var(--border)'}
+                          strokeWidth="1"
+                          opacity="0.95"
+                        />
+                        <text x={mx} y={my - 9} textAnchor="middle"
+                          style={{ fontSize: '9px', fill: hasLabel ? 'var(--text2)' : 'var(--text3)', fontFamily: 'var(--mono)', pointerEvents: 'none' }}>
+                          {hasLabel ? (edge.condition_label.length > 9 ? edge.condition_label.slice(0, 9) + '…' : edge.condition_label) : '+ label'}
+                        </text>
+                      </g>
+                    )}
+                    {/* Published: just show label text, no interaction */}
+                    {isPublished && hasLabel && (
+                      <text x={mx} y={my - 8} textAnchor="middle"
+                        style={{ fontSize: '10px', fill: 'var(--text3)', fontFamily: 'var(--mono)', pointerEvents: 'none' }}>
+                        {edge.condition_label}
+                      </text>
+                    )}
+
+                    {/* Delete button */}
+                    {!isPublished && (
+                      <>
+                        <circle cx={mx} cy={my + 10} r="9" fill="var(--surface)" stroke="var(--border2)" strokeWidth="1"
+                          style={{ cursor: 'pointer' }}
+                          onClick={e => { e.stopPropagation(); removeEdge(edge.id) }} />
+                        <text x={mx} y={my + 15} textAnchor="middle"
+                          style={{ fontSize: '12px', fill: 'var(--red)', pointerEvents: 'none' }}>×</text>
+                      </>
+                    )}
                   </g>
                 )
               })}
@@ -1672,6 +1738,15 @@ function FlowBuilder() {
           onClose={() => { setEdgeModal(null); setAddingEdge(null) }}
         />
       )}
+
+      {editingEdge && (
+        <EdgeLabelModal
+          title="EDIT CONNECTION LABEL"
+          initial={editingEdge.label}
+          onConfirm={(label) => renameEdge(editingEdge.id, label)}
+          onClose={() => setEditingEdge(null)}
+        />
+      )}
     </div>
   )
 }
@@ -1694,41 +1769,35 @@ function EdgeLabelModal({ onConfirm, onClose }) {
 
   function handleSubmit(e) {
     e.preventDefault()
-    if (!label.trim()) return
-    onConfirm(label.trim())
+    onConfirm(label.trim()) // allow empty label
   }
 
   return (
     <Modal title="CONNECTION LABEL" onClose={onClose}>
-      <p style={{ color: 'var(--text3)', fontSize: '13px', marginBottom: '20px', lineHeight: 1.6 }}>
-        What condition does this connection represent?
+      <p style={{ color: 'var(--text3)', fontSize: '13px', marginBottom: '16px', lineHeight: 1.6 }}>
+        Label this connection — use anything that describes the path (e.g. "Card expired", "Try again", "Escalate to billing").
+        Leave blank to have no label.
       </p>
-      <form onSubmit={handleSubmit}>
-        <div style={{ marginBottom: '16px' }}>
-          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '10px' }}>
-            {['Yes', 'No', 'Maybe', 'Resolved', 'Escalate'].map(s => (
-              <button key={s} type="button" onClick={() => setLabel(s)}
-                style={{ padding: '4px 10px', borderRadius: '4px', fontSize: '12px', border: `1px solid ${label === s ? 'var(--accent)' : 'var(--border)'}`, background: label === s ? '#0d1a3a' : 'var(--surface2)', color: label === s ? 'var(--accent2)' : 'var(--text3)', transition: 'all 0.15s' }}>
-                {s}
-              </button>
-            ))}
-          </div>
-          <input ref={inputRef} value={label} onChange={e => setLabel(e.target.value)} placeholder="or type custom label…"
-            style={{ width: '100%', padding: '10px 12px', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text)', fontSize: '14px', outline: 'none', transition: 'border-color 0.15s' }}
-            onFocus={e => e.target.style.borderColor = 'var(--accent)'}
-            onBlur={e => e.target.style.borderColor = 'var(--border)'} />
-        </div>
-        <div style={{ display: 'flex', gap: '10px' }}>
-          <button type="submit" disabled={!label.trim()}
-            style={{ flex: 1, padding: '10px', background: 'var(--accent)', color: '#fff', borderRadius: '6px', fontSize: '13px', fontWeight: 500, opacity: label.trim() ? 1 : 0.5 }}>
-            Add Connection
-          </button>
-          <button type="button" onClick={onClose}
-            style={{ padding: '10px 16px', border: '1px solid var(--border)', color: 'var(--text2)', borderRadius: '6px', fontSize: '13px' }}>
-            Cancel
-          </button>
-        </div>
-      </form>
+      <input
+        ref={inputRef}
+        value={label}
+        onChange={e => setLabel(e.target.value)}
+        onKeyDown={e => e.key === 'Enter' && handleSubmit(e)}
+        placeholder="e.g. Card expired, Not resolved, Try again…"
+        style={{ width: '100%', padding: '11px 13px', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text)', fontSize: '14px', outline: 'none', transition: 'border-color 0.15s', marginBottom: '20px' }}
+        onFocus={e => e.target.style.borderColor = 'var(--accent)'}
+        onBlur={e => e.target.style.borderColor = 'var(--border)'}
+      />
+      <div style={{ display: 'flex', gap: '10px' }}>
+        <button onClick={handleSubmit}
+          style={{ flex: 1, padding: '10px', background: 'var(--accent)', color: '#fff', borderRadius: '6px', fontSize: '13px', fontWeight: 500 }}>
+          Add Connection
+        </button>
+        <button onClick={onClose}
+          style={{ padding: '10px 16px', border: '1px solid var(--border)', color: 'var(--text2)', borderRadius: '6px', fontSize: '13px' }}>
+          Cancel
+        </button>
+      </div>
     </Modal>
   )
 }
