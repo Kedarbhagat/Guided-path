@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { Routes, Route, Link, useNavigate, useParams, useLocation } from 'react-router-dom'
 
 // ─── API ──────────────────────────────────────────────────────
@@ -1132,6 +1132,15 @@ function FlowBuilder() {
   const nodePositions = useRef({})
   const nodeRefs = useRef({})
   const svgRef = useRef(null)
+  const canvasRef = useRef(null)
+  const transformLayerRef = useRef(null)
+  const bgPatternRef = useRef(null)
+  const [zoom, setZoom] = useState(1)
+  const [pan, setPan] = useState({ x: 0, y: 0 })
+  const zoomRef = useRef(1)
+  const panRef = useRef({ x: 0, y: 0 })
+  const isPanning = useRef(false)
+  const panStart = useRef({ mx: 0, my: 0, px: 0, py: 0 })
 
   useEffect(() => {
     Promise.all([api.getVersion(flowId, versionId), api.getFlow(flowId)])
@@ -1156,6 +1165,69 @@ function FlowBuilder() {
     window.addEventListener('keydown', h)
     return () => window.removeEventListener('keydown', h)
   }, [editingNode])
+
+  // ── Zoom via scroll wheel ──────────────────────────────
+  useEffect(() => {
+    const el = canvasRef.current
+    if (!el) return
+    function onWheel(e) {
+      e.preventDefault()
+      const delta = e.deltaY > 0 ? 0.9 : 1.1
+      const next = Math.min(3, Math.max(0.2, zoomRef.current * delta))
+      zoomRef.current = next
+      setZoom(next)
+    }
+    el.addEventListener('wheel', onWheel, { passive: false })
+    return () => el.removeEventListener('wheel', onWheel)
+  }, [loading])
+
+  // ── Pan by dragging canvas background ──────────────────
+  function onCanvasMouseDown(e) {
+    // Only pan when clicking the bare canvas background (the SVG rect or the viewport div itself)
+    // Never steal focus from inputs, textareas, buttons, or the edit panel
+    const tag = e.target.tagName.toLowerCase()
+    const isBackground = tag === 'rect' || tag === 'svg' || e.target === canvasRef.current
+    if (!isBackground) return
+    if (addingEdge) return
+    e.preventDefault() // prevent focus loss only on background clicks
+    isPanning.current = true
+    panStart.current = { mx: e.clientX, my: e.clientY, px: panRef.current.x, py: panRef.current.y }
+    if (canvasRef.current) canvasRef.current.style.cursor = 'grabbing'
+  }
+
+  function applyZoom(delta, center) {
+    const next = Math.min(3, Math.max(0.2, zoomRef.current * delta))
+    zoomRef.current = next
+    setZoom(next)
+  }
+
+  // Imperatively redraw SVG edge paths from current nodePositions — no React re-render
+  function redrawEdges() {
+    if (!svgRef.current) return
+    const paths = svgRef.current.querySelectorAll('[data-edge-path]')
+    const texts = svgRef.current.querySelectorAll('[data-edge-label]')
+    const delBtns = svgRef.current.querySelectorAll('[data-edge-del]')
+    const delXs = svgRef.current.querySelectorAll('[data-edge-delx]')
+    paths.forEach(path => {
+      const edgeId = path.getAttribute('data-edge-path')
+      const srcId = path.getAttribute('data-src')
+      const tgtId = path.getAttribute('data-tgt')
+      const srcPos = nodePositions.current[srcId] || {}
+      const tgtPos = nodePositions.current[tgtId] || {}
+      const x1 = (srcPos.x || 0) + NODE_W
+      const y1 = (srcPos.y || 0) + NODE_H / 2
+      const x2 = tgtPos.x || 0
+      const y2 = (tgtPos.y || 0) + NODE_H / 2
+      const mx = (x1 + x2) / 2, my = (y1 + y2) / 2
+      path.setAttribute('d', `M ${x1} ${y1} C ${mx} ${y1} ${mx} ${y2} ${x2} ${y2}`)
+      const label = svgRef.current.querySelector(`[data-edge-label="${edgeId}"]`)
+      if (label) { label.setAttribute('x', mx); label.setAttribute('y', my - 8) }
+      const btn = svgRef.current.querySelector(`[data-edge-del="${edgeId}"]`)
+      if (btn) { btn.setAttribute('cx', mx); btn.setAttribute('cy', my + 6) }
+      const bx = svgRef.current.querySelector(`[data-edge-delx="${edgeId}"]`)
+      if (bx) { bx.setAttribute('x', mx); bx.setAttribute('y', my + 11) }
+    })
+  }
 
   const isPublished = version?.status === 'published'
   const hasStart = nodes.some(n => n.is_start)
@@ -1253,18 +1325,45 @@ function FlowBuilder() {
 
   useEffect(() => {
     function onMouseMove(e) {
+      // Pan canvas — only update pan state (does not unmount NodeEditPanel)
+      if (isPanning.current) {
+        const dx = e.clientX - panStart.current.mx
+        const dy = e.clientY - panStart.current.my
+        const nx = panStart.current.px + dx
+        const ny = panStart.current.py + dy
+        panRef.current = { x: nx, y: ny }
+        // Directly mutate the transform layer DOM — zero React re-renders
+        if (transformLayerRef.current) {
+          transformLayerRef.current.style.transform = `translate(${nx}px, ${ny}px) scale(${zoomRef.current})`
+        }
+        // Update dot grid offset directly
+        if (bgPatternRef.current) {
+          bgPatternRef.current.setAttribute('x', nx % 20)
+          bgPatternRef.current.setAttribute('y', ny % 20)
+        }
+        return
+      }
+      // Drag node — zero React state updates, pure DOM mutation
       if (!dragging.current) return
-      const dx = e.clientX - dragStart.current.mx
-      const dy = e.clientY - dragStart.current.my
+      const dx = (e.clientX - dragStart.current.mx) / zoomRef.current
+      const dy = (e.clientY - dragStart.current.my) / zoomRef.current
       const newX = Math.max(0, dragStart.current.x + dx)
       const newY = Math.max(0, dragStart.current.y + dy)
       nodePositions.current[dragging.current] = { x: newX, y: newY }
+      // Move node div
       const el = nodeRefs.current[dragging.current]
       if (el) { el.style.left = newX + 'px'; el.style.top = newY + 'px' }
-      if (svgRef.current) svgRef.current.dispatchEvent(new Event('nodeMove'))
-      forceRender(n => n + 1)
+      // Redraw only the affected edges directly in SVG DOM
+      redrawEdges()
     }
     function onMouseUp(e) {
+      if (isPanning.current) {
+        isPanning.current = false
+        if (canvasRef.current) canvasRef.current.style.cursor = ''
+        // Sync pan state once on release
+        setPan({ ...panRef.current })
+        return
+      }
       if (!dragging.current) return
       const id = dragging.current
       const pos = nodePositions.current[id]
@@ -1398,109 +1497,148 @@ function FlowBuilder() {
 
       {/* Canvas + panel */}
       <div style={{ flex: 1, display: 'flex', overflow: 'hidden' }}>
-        <div style={{ flex: 1, position: 'relative', overflow: 'hidden' }}>
-          {/* SVG edges */}
-          <svg ref={svgRef} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
+        {/* ── Outer canvas viewport ── */}
+        <div ref={canvasRef} onMouseDown={onCanvasMouseDown}
+          style={{ flex: 1, position: 'relative', overflow: 'hidden', cursor: 'default', background: 'var(--bg)' }}>
+
+          {/* Fixed dot-grid background — does NOT zoom/pan */}
+          <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
             <defs>
-              <pattern id="dots" x="0" y="0" width="20" height="20" patternUnits="userSpaceOnUse">
+              <pattern id="dots" x={pan.x % 20} y={pan.y % 20} width="20" height="20" patternUnits="userSpaceOnUse">
                 <circle cx="1" cy="1" r="1" fill="var(--border)" />
               </pattern>
-              <marker id="arrow" markerWidth="8" markerHeight="8" refX="8" refY="3" orient="auto">
-                <path d="M0,0 L0,6 L8,3 z" fill="var(--border2)" />
-              </marker>
             </defs>
             <rect width="100%" height="100%" fill="url(#dots)" />
-
-            {edges.map(edge => {
-              const src = nodes.find(n => n.id === edge.source)
-              const tgt = nodes.find(n => n.id === edge.target)
-              if (!src || !tgt) return null
-              const srcPos = nodePositions.current[src.id] || src.position || {}
-              const tgtPos = nodePositions.current[tgt.id] || tgt.position || {}
-              const x1 = (srcPos.x || 0) + NODE_W
-              const y1 = (srcPos.y || 0) + NODE_H / 2
-              const x2 = tgtPos.x || 0
-              const y2 = (tgtPos.y || 0) + NODE_H / 2
-              const mx = (x1 + x2) / 2, my = (y1 + y2) / 2
-
-              return (
-                <g key={edge.id} style={{ pointerEvents: 'all' }}>
-                  <path d={`M ${x1} ${y1} C ${mx} ${y1} ${mx} ${y2} ${x2} ${y2}`}
-                    fill="none" stroke="var(--border2)" strokeWidth="1.5" markerEnd="url(#arrow)" />
-                  <text x={mx} y={my - 8} textAnchor="middle"
-                    style={{ fontSize: '10px', fill: 'var(--text3)', fontFamily: 'var(--mono)', pointerEvents: 'none' }}>
-                    {edge.condition_label}
-                  </text>
-                  {!isPublished && <>
-                    <circle cx={mx} cy={my + 6} r="9" fill="var(--surface)" stroke="var(--border2)" strokeWidth="1"
-                      style={{ cursor: 'pointer' }}
-                      onClick={e => { e.stopPropagation(); removeEdge(edge.id) }} />
-                    <text x={mx} y={my + 11} textAnchor="middle"
-                      style={{ fontSize: '12px', fill: 'var(--red)', pointerEvents: 'none' }}>×</text>
-                  </>}
-                </g>
-              )
-            })}
           </svg>
 
-          {/* Nodes */}
-          {nodes.map(node => {
-            const typeColor = { question: 'var(--accent)', result: 'var(--green)' }[node.type] || 'var(--text3)'
-            const isEditing = editingNode?.id === node.id
-            const pos = nodePositions.current[node.id] || node.position || {}
+          {/* Zoom controls — fixed to viewport */}
+          <div style={{ position: 'absolute', bottom: '20px', left: '20px', zIndex: 50, display: 'flex', flexDirection: 'column', gap: '0px' }}>
+            <button onClick={() => { const n = Math.min(3, zoomRef.current * 1.2); zoomRef.current = n; setZoom(n) }}
+              style={{ width: '32px', height: '32px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '6px 6px 0 0', color: 'var(--text2)', fontSize: '18px', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'background 0.15s' }}
+              onMouseEnter={e => e.currentTarget.style.background = 'var(--surface2)'}
+              onMouseLeave={e => e.currentTarget.style.background = 'var(--surface)'}>+</button>
+            <div style={{ width: '32px', padding: '4px 0', background: 'var(--surface)', border: '1px solid var(--border)', borderTop: 'none', borderBottom: 'none', textAlign: 'center', fontFamily: 'var(--mono)', fontSize: '9px', color: 'var(--text3)' }}>
+              {Math.round(zoom * 100)}%
+            </div>
+            <button onClick={() => { const n = Math.max(0.2, zoomRef.current * 0.8); zoomRef.current = n; setZoom(n) }}
+              style={{ width: '32px', height: '32px', background: 'var(--surface)', border: '1px solid var(--border)', borderBottom: 'none', color: 'var(--text2)', fontSize: '18px', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'background 0.15s' }}
+              onMouseEnter={e => e.currentTarget.style.background = 'var(--surface2)'}
+              onMouseLeave={e => e.currentTarget.style.background = 'var(--surface)'}>−</button>
+            <button onClick={() => { zoomRef.current = 1; setZoom(1); panRef.current = { x: 0, y: 0 }; setPan({ x: 0, y: 0 }) }}
+              title="Reset view"
+              style={{ width: '32px', height: '32px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '0 0 6px 6px', color: 'var(--text3)', fontSize: '11px', display: 'flex', alignItems: 'center', justifyContent: 'center', transition: 'background 0.15s' }}
+              onMouseEnter={e => e.currentTarget.style.background = 'var(--surface2)'}
+              onMouseLeave={e => e.currentTarget.style.background = 'var(--surface)'}>⊙</button>
+          </div>
 
-            return (
-              <div key={node.id}
-                ref={el => { if (el) nodeRefs.current[node.id] = el }}
-                onMouseDown={e => onMouseDown(e, node.id)}
-                style={{
-                  position: 'absolute', left: pos.x || 0, top: pos.y || 0, width: `${NODE_W}px`,
-                  background: isEditing ? 'var(--surface2)' : 'var(--surface)',
-                  border: `1.5px solid ${isEditing ? typeColor : addingEdge && addingEdge !== node.id ? 'var(--accent)' : 'var(--border)'}`,
-                  borderRadius: '10px',
-                  cursor: addingEdge && addingEdge !== node.id ? 'crosshair' : 'grab',
-                  userSelect: 'none',
-                  boxShadow: isEditing ? `0 0 0 3px ${typeColor}22` : '0 2px 8px rgba(0,0,0,0.3)',
-                  transition: 'border-color 0.15s, box-shadow 0.15s',
-                }}>
-                <div style={{ padding: '9px 10px 8px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
-                    <div style={{ width: '8px', height: '8px', borderRadius: '2px', background: typeColor, flexShrink: 0 }} />
-                    {node.is_start && <span style={{ fontFamily: 'var(--mono)', fontSize: '8px', color: 'var(--accent)', padding: '1px 5px', background: '#0d1a3a', borderRadius: '3px', border: '1px solid #1a2a5a' }}>START</span>}
-                    <span style={{ fontFamily: 'var(--mono)', fontSize: '9px', color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{node.type}</span>
+          {/* Hint — fixed to viewport */}
+          <div style={{ position: 'absolute', bottom: '20px', right: '20px', zIndex: 50, fontFamily: 'var(--mono)', fontSize: '10px', color: 'var(--text3)', pointerEvents: 'none' }}>
+            scroll to zoom · drag canvas to pan
+          </div>
+
+          {/* ── Transform layer — zoom + pan applied here ── */}
+          <div style={{ position: 'absolute', inset: 0, transformOrigin: '0 0', transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
+
+            {/* Edges SVG — large canvas so edges always render */}
+            <svg ref={svgRef} style={{ position: 'absolute', left: 0, top: 0, width: '8000px', height: '8000px', pointerEvents: 'none', overflow: 'visible' }}>
+              <defs>
+                <marker id="arrow" markerWidth="8" markerHeight="8" refX="8" refY="3" orient="auto">
+                  <path d="M0,0 L0,6 L8,3 z" fill="var(--border2)" />
+                </marker>
+              </defs>
+
+              {edges.map(edge => {
+                const src = nodes.find(n => n.id === edge.source)
+                const tgt = nodes.find(n => n.id === edge.target)
+                if (!src || !tgt) return null
+                const srcPos = nodePositions.current[src.id] || src.position || {}
+                const tgtPos = nodePositions.current[tgt.id] || tgt.position || {}
+                const x1 = (srcPos.x || 0) + NODE_W
+                const y1 = (srcPos.y || 0) + NODE_H / 2
+                const x2 = tgtPos.x || 0
+                const y2 = (tgtPos.y || 0) + NODE_H / 2
+                const mx = (x1 + x2) / 2, my = (y1 + y2) / 2
+
+                return (
+                  <g key={edge.id} style={{ pointerEvents: 'all' }}>
+                    <path d={`M ${x1} ${y1} C ${mx} ${y1} ${mx} ${y2} ${x2} ${y2}`}
+                      fill="none" stroke="var(--border2)" strokeWidth="1.5" markerEnd="url(#arrow)" />
+                    <text x={mx} y={my - 8} textAnchor="middle"
+                      style={{ fontSize: '10px', fill: 'var(--text3)', fontFamily: 'var(--mono)', pointerEvents: 'none' }}>
+                      {edge.condition_label}
+                    </text>
+                    {!isPublished && <>
+                      <circle cx={mx} cy={my + 6} r="9" fill="var(--surface)" stroke="var(--border2)" strokeWidth="1"
+                        style={{ cursor: 'pointer' }}
+                        onClick={e => { e.stopPropagation(); removeEdge(edge.id) }} />
+                      <text x={mx} y={my + 11} textAnchor="middle"
+                        style={{ fontSize: '12px', fill: 'var(--red)', pointerEvents: 'none' }}>×</text>
+                    </>}
+                  </g>
+                )
+              })}
+            </svg>
+
+            {/* Nodes */}
+            {nodes.map(node => {
+              const typeColor = { question: 'var(--accent)', result: 'var(--green)' }[node.type] || 'var(--text3)'
+              const isEditing = editingNode?.id === node.id
+              const pos = nodePositions.current[node.id] || node.position || {}
+
+              return (
+                <div key={node.id}
+                  ref={el => { if (el) nodeRefs.current[node.id] = el }}
+                  onMouseDown={e => onMouseDown(e, node.id)}
+                  style={{
+                    position: 'absolute', left: pos.x || 0, top: pos.y || 0, width: `${NODE_W}px`,
+                    background: isEditing ? 'var(--surface2)' : 'var(--surface)',
+                    border: `1.5px solid ${isEditing ? typeColor : addingEdge && addingEdge !== node.id ? 'var(--accent)' : 'var(--border)'}`,
+                    borderRadius: '10px',
+                    cursor: addingEdge && addingEdge !== node.id ? 'crosshair' : 'grab',
+                    userSelect: 'none',
+                    boxShadow: isEditing ? `0 0 0 3px ${typeColor}22` : '0 2px 8px rgba(0,0,0,0.3)',
+                    transition: 'border-color 0.15s, box-shadow 0.15s',
+                  }}>
+                  <div style={{ padding: '9px 10px 8px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                      <div style={{ width: '8px', height: '8px', borderRadius: '2px', background: typeColor, flexShrink: 0 }} />
+                      {node.is_start && <span style={{ fontFamily: 'var(--mono)', fontSize: '8px', color: 'var(--accent)', padding: '1px 5px', background: '#0d1a3a', borderRadius: '3px', border: '1px solid #1a2a5a' }}>START</span>}
+                      <span style={{ fontFamily: 'var(--mono)', fontSize: '9px', color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{node.type}</span>
+                    </div>
+                    {!isPublished && (
+                      <button onClick={e => { e.stopPropagation(); setDeleteConfirm(node.id) }}
+                        style={{ color: 'var(--text3)', fontSize: '16px', lineHeight: 1, width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '3px', transition: 'color 0.1s' }}
+                        onMouseEnter={e => e.currentTarget.style.color = 'var(--red)'}
+                        onMouseLeave={e => e.currentTarget.style.color = 'var(--text3)'}>×</button>
+                    )}
                   </div>
-                  {!isPublished && (
-                    <button onClick={e => { e.stopPropagation(); setDeleteConfirm(node.id) }}
-                      style={{ color: 'var(--text3)', fontSize: '16px', lineHeight: 1, width: '20px', height: '20px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '3px', transition: 'color 0.1s' }}
-                      onMouseEnter={e => e.currentTarget.style.color = 'var(--red)'}
-                      onMouseLeave={e => e.currentTarget.style.color = 'var(--text3)'}>×</button>
+                  <div style={{ padding: '10px 12px' }}>
+                    <div style={{ fontSize: '12px', lineHeight: 1.45, color: 'var(--text)', fontWeight: 500 }}>{node.title}</div>
+                    {node.body && <div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '4px', lineHeight: 1.4 }}>{node.body.slice(0, 50)}{node.body.length > 50 ? '…' : ''}</div>}
+                  </div>
+                  {!isPublished && node.type !== 'result' && (
+                    <div style={{ padding: '6px 10px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
+                      <button onClick={e => { e.stopPropagation(); setAddingEdge(node.id) }}
+                        style={{ fontSize: '10px', color: addingEdge === node.id ? '#fff' : 'var(--accent)', fontFamily: 'var(--mono)', padding: '3px 8px', border: `1px solid var(--accent)`, borderRadius: '3px', background: addingEdge === node.id ? 'var(--accent)' : '#0d1a3a', transition: 'all 0.15s' }}>
+                        {addingEdge === node.id ? '● connecting…' : '+ connect'}
+                      </button>
+                    </div>
                   )}
                 </div>
-                <div style={{ padding: '10px 12px' }}>
-                  <div style={{ fontSize: '12px', lineHeight: 1.45, color: 'var(--text)', fontWeight: 500 }}>{node.title}</div>
-                  {node.body && <div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '4px', lineHeight: 1.4 }}>{node.body.slice(0, 50)}{node.body.length > 50 ? '…' : ''}</div>}
-                </div>
-                {!isPublished && node.type !== 'result' && (
-                  <div style={{ padding: '6px 10px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
-                    <button onClick={e => { e.stopPropagation(); setAddingEdge(node.id) }}
-                      style={{ fontSize: '10px', color: addingEdge === node.id ? '#fff' : 'var(--accent)', fontFamily: 'var(--mono)', padding: '3px 8px', border: `1px solid var(--accent)`, borderRadius: '3px', background: addingEdge === node.id ? 'var(--accent)' : '#0d1a3a', transition: 'all 0.15s' }}>
-                      {addingEdge === node.id ? '● connecting…' : '+ connect'}
-                    </button>
-                  </div>
-                )}
-              </div>
-            )
-          })}
+              )
+            })}
 
-          {nodes.length === 0 && (
-            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
-              <div style={{ textAlign: 'center', color: 'var(--text3)' }}>
-                <div style={{ fontSize: '28px', marginBottom: '14px', opacity: 0.4 }}>◈</div>
-                <div style={{ fontSize: '14px', color: 'var(--text2)', marginBottom: '6px' }}>Empty canvas</div>
-                <div style={{ fontSize: '12px' }}>Add a Question node to start building</div>
+            {nodes.length === 0 && (
+              <div style={{ position: 'absolute', inset: 0, width: '100vw', height: '100vh', display: 'flex', alignItems: 'center', justifyContent: 'center', pointerEvents: 'none' }}>
+                <div style={{ textAlign: 'center', color: 'var(--text3)' }}>
+                  <div style={{ fontSize: '28px', marginBottom: '14px', opacity: 0.4 }}>◈</div>
+                  <div style={{ fontSize: '14px', color: 'var(--text2)', marginBottom: '6px' }}>Empty canvas</div>
+                  <div style={{ fontSize: '12px' }}>Add a Question node to start building</div>
+                </div>
               </div>
-            </div>
-          )}
+            )}
+
+          </div>{/* end transform layer */}
         </div>
 
         {/* Edit panel */}
@@ -1595,6 +1733,16 @@ function EdgeLabelModal({ onConfirm, onClose }) {
   )
 }
 
+// ── Field must be defined OUTSIDE any component so it is never re-created ──
+function PanelField({ label, children }) {
+  return (
+    <div style={{ marginBottom: '18px' }}>
+      <div style={{ fontSize: '10px', color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: '6px', letterSpacing: '0.08em' }}>{label}</div>
+      {children}
+    </div>
+  )
+}
+
 function NodeEditPanel({ node, onSave, onClose }) {
   const [title, setTitle] = useState(node.title || '')
   const [body, setBody] = useState(node.body || '')
@@ -1604,14 +1752,12 @@ function NodeEditPanel({ node, onSave, onClose }) {
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
 
-  // Warn on unsaved changes if panel closes
   useEffect(() => {
     setTitle(node.title || ''); setBody(node.body || ''); setType(node.type || 'question')
     setResolution(node.metadata?.resolution || ''); setEscalateTo(node.metadata?.escalate_to || '')
     setDirty(false)
   }, [node.id])
 
-  // Cmd+S to save
   useEffect(() => {
     const h = (e) => {
       if ((e.metaKey || e.ctrlKey) && e.key === 's') { e.preventDefault(); if (dirty && title.trim()) handleSave() }
@@ -1631,15 +1777,6 @@ function NodeEditPanel({ node, onSave, onClose }) {
     setDirty(false)
   }
 
-  function Field({ label, children }) {
-    return (
-      <div style={{ marginBottom: '18px' }}>
-        <div style={{ fontSize: '10px', color: 'var(--text3)', fontFamily: 'var(--mono)', marginBottom: '6px', letterSpacing: '0.08em' }}>{label}</div>
-        {children}
-      </div>
-    )
-  }
-
   const inputStyle = { width: '100%', padding: '9px 11px', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text)', fontSize: '13px', outline: 'none', transition: 'border-color 0.15s', lineHeight: 1.5 }
   const focusStyle = (e) => e.target.style.borderColor = 'var(--accent)'
   const blurStyle = (e) => e.target.style.borderColor = 'var(--border)'
@@ -1657,7 +1794,7 @@ function NodeEditPanel({ node, onSave, onClose }) {
       </div>
 
       <div style={{ flex: 1, padding: '20px', overflowY: 'auto' }}>
-        <Field label="TYPE">
+        <PanelField label="TYPE">
           <div style={{ display: 'flex', gap: '6px' }}>
             {['question', 'result'].map(t => (
               <button key={t} onClick={() => { setType(t); setDirty(true) }}
@@ -1666,32 +1803,32 @@ function NodeEditPanel({ node, onSave, onClose }) {
               </button>
             ))}
           </div>
-        </Field>
+        </PanelField>
 
-        <Field label="TITLE *">
+        <PanelField label="TITLE *">
           <textarea value={title} onChange={e => { setTitle(e.target.value); setDirty(true) }} rows={3}
             style={{ ...inputStyle, resize: 'vertical' }} onFocus={focusStyle} onBlur={blurStyle} />
-        </Field>
+        </PanelField>
 
-        <Field label="DESCRIPTION">
+        <PanelField label="DESCRIPTION">
           <textarea value={body} onChange={e => { setBody(e.target.value); setDirty(true) }} rows={3}
             placeholder="Additional context for the agent…"
             style={{ ...inputStyle, resize: 'vertical' }} onFocus={focusStyle} onBlur={blurStyle} />
-        </Field>
+        </PanelField>
 
         {type === 'result' && (
           <>
             <div style={{ height: '1px', background: 'var(--border)', margin: '4px 0 18px' }} />
-            <Field label="RESOLUTION STEPS">
+            <PanelField label="RESOLUTION STEPS">
               <textarea value={resolution} onChange={e => { setResolution(e.target.value); setDirty(true) }} rows={5}
                 placeholder="Steps to resolve this issue…"
                 style={{ ...inputStyle, resize: 'vertical' }} onFocus={focusStyle} onBlur={blurStyle} />
-            </Field>
-            <Field label="ESCALATE TO">
+            </PanelField>
+            <PanelField label="ESCALATE TO">
               <input value={escalateTo} onChange={e => { setEscalateTo(e.target.value); setDirty(true) }}
                 placeholder="e.g. Tier 2 Engineering"
                 style={inputStyle} onFocus={focusStyle} onBlur={blurStyle} />
-            </Field>
+            </PanelField>
           </>
         )}
       </div>
