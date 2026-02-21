@@ -89,11 +89,8 @@ function parseVisioXml(pageXml, mastersXml) {
   const edges = []
   const idMap = {}   // visio shape ID → tempId
   let nodeIndex = 0
-  let foundStart = false
 
   // ── Step 1: Build connector wire map from <Connects> ──────
-  // FromPart=9 → connector begin (source node)
-  // FromPart=12 → connector end (target node)
   const connectorMap = {}
   doc.querySelectorAll('Connect').forEach(c => {
     const fromSheet = c.getAttribute('FromSheet')
@@ -104,54 +101,79 @@ function parseVisioXml(pageXml, mastersXml) {
     if (fromPart === '12') connectorMap[fromSheet].to   = toSheet
   })
 
-  // ── Step 2: Process all shapes ─────────────────────────────
+  // ── Step 2: Collect raw shapes (no type assignment yet) ────
+  const rawShapes = []
   doc.querySelectorAll('Shape').forEach(shape => {
-    const shapeId   = shape.getAttribute('ID')
-    const shapeType = shape.getAttribute('Type')   // "Shape" | "Edge" | undefined
-    const masterId  = shape.getAttribute('Master')
+    const shapeId    = shape.getAttribute('ID')
+    const shapeType  = shape.getAttribute('Type')
+    const masterId   = shape.getAttribute('Master')
     const masterInfo = masterId ? masterMap.get(masterId) : null
-
-    // Get label text
-    const textEl = shape.querySelector('Text')
-    const rawText = textEl ? textEl.textContent : ''
-    const label = rawText.trim().replace(/\s+/g, ' ')
-
-    // ── Connector (Edge type or connector master) ────────────
+    const textEl     = shape.querySelector('Text')
+    const label      = (textEl ? textEl.textContent : '').trim().replace(/\s+/g, ' ')
     const isEdgeType = shapeType === 'Edge'
     const isConnectorMaster = masterInfo && CONNECTOR_MASTERS.has(masterInfo.nameU || masterInfo.name)
+    const masterKey  = masterInfo ? (masterInfo.nameU || masterInfo.name) : ''
+    const isTerminator = ['terminator', 'start/end', 'start', 'end', 'terminal'].includes(masterKey)
 
     if (isEdgeType || isConnectorMaster || connectorMap[shapeId]) {
-      // This is a connector — handle as edge later
       if (connectorMap[shapeId]?.from && connectorMap[shapeId]?.to) {
-        // Store temporarily — resolve to node IDs after nodes are processed
         edges.push({
           _visioSrcId: connectorMap[shapeId].from,
           _visioTgtId: connectorMap[shapeId].to,
           tempId: `import-edge-${edges.length}`,
-          sourceId: null,
-          targetId: null,
+          sourceId: null, targetId: null,
           label: label || '',
         })
       }
       return
     }
+    if (!label) return
 
-    // ── Node (regular shape) ─────────────────────────────────
-    if (!label) return // skip unlabelled shapes
-
-    // Position: Visio uses inches, origin bottom-left, Y inverted
-    // Scale: 1 inch = 96px, page height assumed ~11in (letter)
     const pinX = parseFloat(shape.querySelector('XForm > PinX')?.textContent || 0)
     const pinY = parseFloat(shape.querySelector('XForm > PinY')?.textContent || 0)
+    rawShapes.push({ shapeId, masterInfo, masterKey, isTerminator, label, pinX, pinY })
+  })
+
+  // ── Step 3: Determine start node BEFORE assigning types ────
+  // Strategy: the start node is the shape that NO connector points TO.
+  // i.e. it has no incoming edges. This is graph-theoretically correct
+  // regardless of position or shape type.
+  const allTargetIds = new Set(
+    edges.map(e => e._visioTgtId).filter(Boolean)
+  )
+  const nodeShapeIds = new Set(rawShapes.map(s => s.shapeId))
+
+  // Find shapes with no incoming edges (not a target of any connector)
+  const noIncoming = rawShapes.filter(s => !allTargetIds.has(s.shapeId))
+
+  // Among those, prefer a terminator/start shape, else take topmost-leftmost
+  const startShape =
+    noIncoming.find(s => s.isTerminator) ||
+    noIncoming.sort((a, b) => b.pinY - a.pinY || a.pinX - b.pinX)[0] ||
+    rawShapes.sort((a, b) => b.pinY - a.pinY || a.pinX - b.pinX)[0]
+
+  const startShapeId = startShape?.shapeId || null
+
+  // ── Step 4: Build nodes with correct type assignment ───────
+  rawShapes.forEach(({ shapeId, masterInfo, masterKey, isTerminator, label, pinX, pinY }) => {
     const x = Math.round(pinX * 96)
     const y = Math.round((11 - pinY) * 96)
 
-    const nodeType = classifyShape(masterInfo, label)
-    if (nodeType === 'connector') return // extra safety
+    const isStart = shapeId === startShapeId
 
-    // Determine if this should be the start node
-    // First "Start/End" shaped node = start, OR topmost node as fallback
-    const couldBeStart = isStartShape(masterInfo, label) && !foundStart
+    // Type logic:
+    // - START node → always 'question' (entry point, never an endpoint)
+    // - Other terminators → 'result'
+    // - Everything else → classifyShape
+    let nodeType
+    if (isStart) {
+      nodeType = 'question'
+    } else if (isTerminator) {
+      nodeType = 'result'
+    } else {
+      nodeType = classifyShape(masterInfo, label)
+    }
+    if (nodeType === 'connector') return
 
     const tempId = `import-node-${nodeIndex++}`
     idMap[shapeId] = tempId
@@ -163,11 +185,9 @@ function parseVisioXml(pageXml, mastersXml) {
       type: nodeType,
       position: { x: Math.max(20, x), y: Math.max(20, y) },
       body: '',
-      is_start: couldBeStart,
-      _masterName: masterInfo ? (masterInfo.nameU || masterInfo.name) : 'unknown',
+      is_start: isStart,
+      _masterName: masterKey || 'unknown',
     })
-
-    if (couldBeStart) foundStart = true
   })
 
   // ── Step 3: Resolve edge node IDs ─────────────────────────
@@ -182,11 +202,10 @@ function parseVisioXml(pageXml, mastersXml) {
   const validEdges = edges.filter(e => e.sourceId && e.targetId)
 
   // ── Step 4: Fallback start node if none detected ───────────
-  if (!foundStart && nodes.length > 0) {
-    // Pick topmost-leftmost node
+  if (!nodes.some(n => n.is_start) && nodes.length > 0) {
     const sorted = [...nodes].sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
     const fallback = nodes.find(n => n.tempId === sorted[0].tempId)
-    if (fallback) fallback.is_start = true
+    if (fallback) { fallback.is_start = true; fallback.type = 'question' }
   }
 
   return { nodes, edges: validEdges }
@@ -447,6 +466,7 @@ export default function VisioImportModal({ onClose, onImported }) {
   const [flowDesc, setFlowDesc] = useState('')
   const [error, setError] = useState('')
   const [saving, setSaving] = useState(false)
+  const [publishAfterSave, setPublishAfterSave] = useState(true)
   const [parseWarnings, setParseWarnings] = useState([])
   const fileRef = useRef()
 
@@ -608,7 +628,14 @@ export default function VisioImportModal({ onClose, onImported }) {
         })
       }
 
-      onImported({ flowId: flow.id, versionId, flowName: flowName.trim() })
+      // 5. Publish the version so it's immediately runnable
+      if (publishAfterSave) {
+        await req('POST', `/flows/${flow.id}/versions/${versionId}/publish`, {
+          change_notes: 'Imported from Visio'
+        })
+      }
+
+      onImported({ flowId: flow.id, versionId, flowName: flowName.trim(), published: publishAfterSave })
     } catch (err) {
       setError(`Save failed: ${err.message}`)
       setSaving(false)
@@ -768,10 +795,16 @@ export default function VisioImportModal({ onClose, onImported }) {
                   style={{ padding: '9px 18px', border: '1px solid #2a3a5a', borderRadius: '6px', color: '#8a9aba', fontSize: '13px', background: 'transparent', cursor: 'pointer' }}>
                   ← Re-upload
                 </button>
-                <button onClick={saveFlow} disabled={saving}
-                  style={{ padding: '9px 24px', background: saving ? '#1a2a4a' : '#4a8fff', border: 'none', borderRadius: '6px', color: saving ? '#4a5a7a' : '#fff', fontSize: '13px', fontWeight: 600, cursor: saving ? 'not-allowed' : 'pointer', transition: 'background 0.15s' }}>
-                  {saving ? 'Saving…' : `⬇ Save Flow (${nodes.length} nodes)`}
-                </button>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <button onClick={() => { setPublishAfterSave(false); saveFlow() }} disabled={saving}
+                    style={{ padding: '9px 16px', background: 'transparent', border: '1px solid #2a3a5a', borderRadius: '6px', color: '#8a9aba', fontSize: '13px', cursor: saving ? 'not-allowed' : 'pointer' }}>
+                    Save as Draft
+                  </button>
+                  <button onClick={() => { setPublishAfterSave(true); saveFlow() }} disabled={saving}
+                    style={{ padding: '9px 20px', background: saving ? '#1a2a4a' : '#4a8fff', border: 'none', borderRadius: '6px', color: saving ? '#4a5a7a' : '#fff', fontSize: '13px', fontWeight: 600, cursor: saving ? 'not-allowed' : 'pointer' }}>
+                    {saving ? 'Saving…' : `⬇ Save & Publish (${nodes.length} nodes)`}
+                  </button>
+                </div>
               </div>
             </div>
           )}
