@@ -1818,12 +1818,14 @@ function NodeEditPanel({ node, onSave, onClose }) {
   const [type, setType] = useState(node.type || 'question')
   const [resolution, setResolution] = useState(node.metadata?.resolution || '')
   const [escalateTo, setEscalateTo] = useState(node.metadata?.escalate_to || '')
+  const [isStart, setIsStart] = useState(node.is_start || false)
   const [saving, setSaving] = useState(false)
   const [dirty, setDirty] = useState(false)
 
   useEffect(() => {
     setTitle(node.title || ''); setBody(node.body || ''); setType(node.type || 'question')
     setResolution(node.metadata?.resolution || ''); setEscalateTo(node.metadata?.escalate_to || '')
+    setIsStart(node.is_start || false)
     setDirty(false)
   }, [node.id])
 
@@ -1838,9 +1840,11 @@ function NodeEditPanel({ node, onSave, onClose }) {
   async function handleSave() {
     if (!title.trim()) return
     setSaving(true)
+    const effectiveType = isStart && type === 'result' ? 'question' : type
     await onSave(node.id, {
-      title: title.trim(), body: body.trim(), type,
-      metadata: type === 'result' ? { resolution, escalate_to: escalateTo || null } : {},
+      title: title.trim(), body: body.trim(), type: effectiveType,
+      is_start: isStart,
+      metadata: effectiveType === 'result' ? { resolution, escalate_to: escalateTo || null } : {},
     })
     setSaving(false)
     setDirty(false)
@@ -1872,6 +1876,36 @@ function NodeEditPanel({ node, onSave, onClose }) {
               </button>
             ))}
           </div>
+        </PanelField>
+
+        <PanelField label="START NODE">
+          <button
+            onClick={() => { setIsStart(s => !s); setDirty(true) }}
+            style={{
+              width: '100%', padding: '8px 12px', borderRadius: '6px', fontSize: '12px',
+              fontFamily: 'var(--mono)', textAlign: 'left',
+              display: 'flex', alignItems: 'center', gap: '10px',
+              border: `1px solid ${isStart ? '#1a4a2a' : 'var(--border)'}`,
+              background: isStart ? '#0a2a14' : 'var(--surface2)',
+              color: isStart ? 'var(--green)' : 'var(--text3)',
+              transition: 'all 0.15s', cursor: 'pointer',
+            }}>
+            <span style={{
+              width: '14px', height: '14px', borderRadius: '50%', flexShrink: 0,
+              border: `2px solid ${isStart ? 'var(--green)' : 'var(--border2)'}`,
+              background: isStart ? 'var(--green)' : 'transparent',
+              display: 'flex', alignItems: 'center', justifyContent: 'center',
+              transition: 'all 0.15s',
+            }}>
+              {isStart && <span style={{ width: '5px', height: '5px', borderRadius: '50%', background: '#fff' }} />}
+            </span>
+            {isStart ? 'This is the START node' : 'Mark as START node'}
+          </button>
+          {isStart && (
+            <div style={{ marginTop: '6px', fontSize: '11px', color: 'var(--text3)', lineHeight: 1.5 }}>
+              The previous start node will be unset automatically.
+            </div>
+          )}
         </PanelField>
 
         <PanelField label="TITLE *">
