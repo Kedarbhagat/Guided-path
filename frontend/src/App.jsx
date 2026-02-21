@@ -1252,12 +1252,18 @@ function FlowBuilder() {
       const y2 = (tgtPos.y || 0) + NODE_H / 2
       const mx = (x1 + x2) / 2, my = (y1 + y2) / 2
       path.setAttribute('d', `M ${x1} ${y1} C ${mx} ${y1} ${mx} ${y2} ${x2} ${y2}`)
+      // label text
       const label = svgRef.current.querySelector(`[data-edge-label="${edgeId}"]`)
-      if (label) { label.setAttribute('x', mx); label.setAttribute('y', my - 8) }
+      if (label) { label.setAttribute('x', mx); label.setAttribute('y', my - 9) }
+      // label pill rect
+      const rect = svgRef.current.querySelector(`[data-edge-label-rect="${edgeId}"]`)
+      if (rect) { rect.setAttribute('x', mx - 32); rect.setAttribute('y', my - 22) }
+      // delete circle
       const btn = svgRef.current.querySelector(`[data-edge-del="${edgeId}"]`)
-      if (btn) { btn.setAttribute('cx', mx); btn.setAttribute('cy', my + 6) }
+      if (btn) { btn.setAttribute('cx', mx); btn.setAttribute('cy', my + 10) }
+      // delete ×
       const bx = svgRef.current.querySelector(`[data-edge-delx="${edgeId}"]`)
-      if (bx) { bx.setAttribute('x', mx); bx.setAttribute('y', my + 11) }
+      if (bx) { bx.setAttribute('x', mx); bx.setAttribute('y', my + 15) }
     })
   }
 
@@ -1603,20 +1609,28 @@ function FlowBuilder() {
 
                 return (
                   <g key={edge.id} style={{ pointerEvents: 'all' }}>
-                    <path d={`M ${x1} ${y1} C ${mx} ${y1} ${mx} ${y2} ${x2} ${y2}`}
+                    {/* data-* attrs are read by redrawEdges() during drag for zero-render updates */}
+                    <path
+                      data-edge-path={edge.id}
+                      data-src={src.id}
+                      data-tgt={tgt.id}
+                      d={`M ${x1} ${y1} C ${mx} ${y1} ${mx} ${y2} ${x2} ${y2}`}
                       fill="none" stroke="var(--border2)" strokeWidth="1.5" markerEnd="url(#arrow)" />
 
                     {/* Clickable label pill — click to edit */}
                     {!isPublished && (
                       <g onClick={e => { e.stopPropagation(); setEditingEdge({ id: edge.id, label: edge.condition_label || '' }) }}
                         style={{ cursor: 'pointer' }}>
-                        <rect x={mx - 32} y={my - 22} width="64" height="18" rx="4"
+                        <rect
+                          data-edge-label-rect={edge.id}
+                          x={mx - 32} y={my - 22} width="64" height="18" rx="4"
                           fill={hasLabel ? 'var(--surface2)' : 'var(--surface)'}
                           stroke={hasLabel ? 'var(--border2)' : 'var(--border)'}
-                          strokeWidth="1"
-                          opacity="0.95"
+                          strokeWidth="1" opacity="0.95"
                         />
-                        <text x={mx} y={my - 9} textAnchor="middle"
+                        <text
+                          data-edge-label={edge.id}
+                          x={mx} y={my - 9} textAnchor="middle"
                           style={{ fontSize: '9px', fill: hasLabel ? 'var(--text2)' : 'var(--text3)', fontFamily: 'var(--mono)', pointerEvents: 'none' }}>
                           {hasLabel ? (edge.condition_label.length > 9 ? edge.condition_label.slice(0, 9) + '…' : edge.condition_label) : '+ label'}
                         </text>
@@ -1624,7 +1638,9 @@ function FlowBuilder() {
                     )}
                     {/* Published: just show label text, no interaction */}
                     {isPublished && hasLabel && (
-                      <text x={mx} y={my - 8} textAnchor="middle"
+                      <text
+                        data-edge-label={edge.id}
+                        x={mx} y={my - 8} textAnchor="middle"
                         style={{ fontSize: '10px', fill: 'var(--text3)', fontFamily: 'var(--mono)', pointerEvents: 'none' }}>
                         {edge.condition_label}
                       </text>
@@ -1633,10 +1649,14 @@ function FlowBuilder() {
                     {/* Delete button */}
                     {!isPublished && (
                       <>
-                        <circle cx={mx} cy={my + 10} r="9" fill="var(--surface)" stroke="var(--border2)" strokeWidth="1"
+                        <circle
+                          data-edge-del={edge.id}
+                          cx={mx} cy={my + 10} r="9" fill="var(--surface)" stroke="var(--border2)" strokeWidth="1"
                           style={{ cursor: 'pointer' }}
                           onClick={e => { e.stopPropagation(); removeEdge(edge.id) }} />
-                        <text x={mx} y={my + 15} textAnchor="middle"
+                        <text
+                          data-edge-delx={edge.id}
+                          x={mx} y={my + 15} textAnchor="middle"
                           style={{ fontSize: '12px', fill: 'var(--red)', pointerEvents: 'none' }}>×</text>
                       </>
                     )}
