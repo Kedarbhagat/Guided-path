@@ -665,14 +665,21 @@ def start_session():
     if err:
         return err
     flow = Flow.query.get_or_404(data["flow_id"])
-    # Use published version if available, otherwise fall back to latest draft
-    version_id = flow.active_version_id
-    if not version_id:
-        latest_draft = FlowVersion.query.filter_by(flow_id=flow.id, status="draft") \
-            .order_by(FlowVersion.version_number.desc()).first()
-        if not latest_draft:
-            return jsonify({"error": "Flow has no published version and no draft"}), 400
-        version_id = latest_draft.id
+    # If caller passes version_id directly (test/draft mode), use that
+    if data.get("version_id"):
+        version_id = data["version_id"]
+        version = FlowVersion.query.filter_by(id=version_id, flow_id=flow.id).first()
+        if not version:
+            return jsonify({"error": "Version not found"}), 404
+    else:
+        # Use published version if available, otherwise fall back to latest draft
+        version_id = flow.active_version_id
+        if not version_id:
+            latest_draft = FlowVersion.query.filter_by(flow_id=flow.id, status="draft") \
+                .order_by(FlowVersion.version_number.desc()).first()
+            if not latest_draft:
+                return jsonify({"error": "Flow has no published version and no draft"}), 400
+            version_id = latest_draft.id
     start_node = Node.query.filter_by(flow_version_id=version_id, is_start=True).first()
     if not start_node:
         return jsonify({"error": "Flow has no start node"}), 400

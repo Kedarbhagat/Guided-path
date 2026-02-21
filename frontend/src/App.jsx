@@ -707,7 +707,7 @@ function MenuItemBtn({ label, onClick, color = 'var(--text2)' }) {
 
 // ─── AGENT EXECUTION ──────────────────────────────────────
 function AgentExecution() {
-  const { flowId } = useParams()
+  const { flowId, versionId: testVersionId } = useParams()
   const navigate = useNavigate()
   const [session, setSession] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -716,19 +716,29 @@ function AgentExecution() {
   const [error, setError] = useState(null)
   const [ticketId, setTicketId] = useState('')
   const [agentName, setAgentName] = useState('')
-  const [showStart, setShowStart] = useState(true)
+  const [showStart, setShowStart] = useState(!testVersionId) // skip details screen in test mode
   const [feedbackRating, setFeedbackRating] = useState(0)
   const [feedbackNote, setFeedbackNote] = useState('')
   const [feedbackSubmitted, setFeedbackSubmitted] = useState(false)
   const [showExport, setShowExport] = useState(false)
   const [exportData, setExportData] = useState(null)
 
+  // In test mode, start immediately without asking for ticket details
+  useEffect(() => {
+    if (testVersionId) startSession()
+  }, [])
+
   // Start session once user fills in ticket details
   async function startSession() {
     setLoading(true)
     setShowStart(false)
     try {
-      const s = await api.startSession({ flow_id: flowId, ticket_id: ticketId || undefined, agent_name: agentName || undefined })
+      const s = await api.startSession({
+        flow_id: flowId,
+        version_id: testVersionId || undefined,
+        ticket_id: ticketId || undefined,
+        agent_name: agentName || undefined,
+      })
       setSession(s)
     } catch (e) {
       setError(e.message)
@@ -803,9 +813,12 @@ function AgentExecution() {
     return (
       <div style={{ height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)' }}>
         <div style={{ width: '420px', animation: 'fadeUp 0.2s ease' }}>
-          <button onClick={() => navigate('/')} style={{ color: 'var(--text3)', fontSize: '12px', fontFamily: 'var(--mono)', marginBottom: '32px', display: 'flex', alignItems: 'center', gap: '6px' }}
+          <button onClick={() => testVersionId ? navigate(`/build/${flowId}/${testVersionId}`) : navigate('/')}
+            style={{ color: 'var(--text3)', fontSize: '12px', fontFamily: 'var(--mono)', marginBottom: '32px', display: 'flex', alignItems: 'center', gap: '6px' }}
             onMouseEnter={e => e.currentTarget.style.color = 'var(--text2)'}
-            onMouseLeave={e => e.currentTarget.style.color = 'var(--text3)'}>← Back to flows</button>
+            onMouseLeave={e => e.currentTarget.style.color = 'var(--text3)'}>
+            {testVersionId ? '← Back to builder' : '← Back to flows'}
+          </button>
 
           <div style={{ fontFamily: 'var(--mono)', fontSize: '10px', color: 'var(--accent)', marginBottom: '12px', letterSpacing: '0.1em' }}>START SESSION</div>
           <h2 style={{ fontSize: '22px', fontWeight: 400, color: 'var(--text)', marginBottom: '28px', letterSpacing: '-0.02em' }}>Session details</h2>
@@ -877,11 +890,22 @@ function AgentExecution() {
       {/* Sidebar */}
       <div style={{ width: '260px', flexShrink: 0, borderRight: '1px solid var(--border)', background: 'var(--surface)', display: 'flex', flexDirection: 'column' }}>
         <div style={{ padding: '20px 20px 0' }}>
-          <button onClick={() => navigate('/')} style={{ display: 'flex', alignItems: 'center', gap: '5px', color: 'var(--text3)', fontSize: '11px', fontFamily: 'var(--mono)', marginBottom: '24px' }}
+          <button onClick={() => testVersionId ? navigate(`/build/${flowId}/${testVersionId}`) : navigate('/')}
+            style={{ display: 'flex', alignItems: 'center', gap: '5px', color: 'var(--text3)', fontSize: '11px', fontFamily: 'var(--mono)', marginBottom: '16px' }}
             onMouseEnter={e => e.currentTarget.style.color = 'var(--text2)'}
             onMouseLeave={e => e.currentTarget.style.color = 'var(--text3)'}>
-            ← Back
+            ← {testVersionId ? 'Back to Builder' : 'Back'}
           </button>
+
+          {testVersionId && (
+            <div style={{ marginBottom: '16px', padding: '8px 10px', background: '#1a1200', border: '1px solid #3a2e00', borderRadius: '6px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <span style={{ fontSize: '14px' }}>⚠</span>
+              <div>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: '9px', color: '#facc15', letterSpacing: '0.1em', fontWeight: 600 }}>TEST MODE</div>
+                <div style={{ fontSize: '10px', color: '#a08830', marginTop: '1px' }}>Running draft — not the published version</div>
+              </div>
+            </div>
+          )}
 
           {(session.ticket_id || session.agent_name) && (
             <div style={{ padding: '10px 12px', background: 'var(--surface2)', borderRadius: '6px', marginBottom: '20px' }}>
@@ -1564,10 +1588,17 @@ function FlowBuilder() {
         )}
         <ToolbarBtn onClick={loadAnalytics} label="⊞ Stats" />
         {!isPublished && (
-          <button onClick={() => setPublishModal(true)} disabled={!hasStart}
-            style={{ padding: '6px 14px', background: hasStart ? 'var(--green)' : 'var(--surface2)', color: hasStart ? '#000' : 'var(--text3)', border: `1px solid ${hasStart ? 'var(--green)' : 'var(--border)'}`, borderRadius: '5px', fontSize: '12px', fontWeight: 600, transition: 'all 0.15s', opacity: hasStart ? 1 : 0.6 }}>
-            ⬆ Publish
-          </button>
+          <>
+            <button onClick={() => hasStart && navigate(`/execute/${flowId}/${versionId}`)} disabled={!hasStart}
+              title={hasStart ? 'Test this draft flow' : 'Set a start node first'}
+              style={{ padding: '6px 14px', background: hasStart ? '#0a1a2a' : 'var(--surface2)', color: hasStart ? 'var(--accent2)' : 'var(--text3)', border: `1px solid ${hasStart ? 'var(--accent)' : 'var(--border)'}`, borderRadius: '5px', fontSize: '12px', fontWeight: 500, transition: 'all 0.15s', opacity: hasStart ? 1 : 0.5, cursor: hasStart ? 'pointer' : 'not-allowed' }}>
+              ▶ Test
+            </button>
+            <button onClick={() => setPublishModal(true)} disabled={!hasStart}
+              style={{ padding: '6px 14px', background: hasStart ? 'var(--green)' : 'var(--surface2)', color: hasStart ? '#000' : 'var(--text3)', border: `1px solid ${hasStart ? 'var(--green)' : 'var(--border)'}`, borderRadius: '5px', fontSize: '12px', fontWeight: 600, transition: 'all 0.15s', opacity: hasStart ? 1 : 0.6 }}>
+              ⬆ Publish
+            </button>
+          </>
         )}
         {isPublished && (
           <button onClick={() => navigate(`/execute/${flowId}`)}
@@ -2032,6 +2063,7 @@ export default function App() {
           <Route path="/analytics" element={<AnalyticsDashboard />} />
           <Route path="/build/:flowId/:versionId" element={<FlowBuilder />} />
           <Route path="/execute/:flowId" element={<AgentExecution />} />
+          <Route path="/execute/:flowId/:versionId" element={<AgentExecution />} />
         </Routes>
       </div>
     </div>
