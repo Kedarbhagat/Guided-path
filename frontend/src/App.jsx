@@ -1173,6 +1173,7 @@ function FlowBuilder() {
   const panRef = useRef({ x: 0, y: 0 })
   const isPanning = useRef(false)
   const panStart = useRef({ mx: 0, my: 0, px: 0, py: 0 })
+  const spaceDown = useRef(false)
 
   useEffect(() => {
     Promise.all([api.getVersion(flowId, versionId), api.getFlow(flowId)])
@@ -1199,6 +1200,31 @@ function FlowBuilder() {
   }, [editingNode])
 
   // ── Zoom via scroll wheel ──────────────────────────────
+  // Space bar = pan mode (Figma-style)
+  useEffect(() => {
+    function onKeyDown(e) {
+      if (e.code === 'Space' && !e.target.matches('input,textarea')) {
+        e.preventDefault()
+        if (!spaceDown.current) {
+          spaceDown.current = true
+          if (canvasRef.current) canvasRef.current.style.cursor = 'grab'
+        }
+      }
+    }
+    function onKeyUp(e) {
+      if (e.code === 'Space') {
+        spaceDown.current = false
+        if (!isPanning.current && canvasRef.current) canvasRef.current.style.cursor = ''
+      }
+    }
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    return () => {
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+    }
+  }, [])
+
   useEffect(() => {
     const el = canvasRef.current
     if (!el) return
@@ -1215,16 +1241,22 @@ function FlowBuilder() {
 
   // ── Pan by dragging canvas background ──────────────────
   function onCanvasMouseDown(e) {
-    // Only pan when clicking the bare canvas background (the SVG rect or the viewport div itself)
-    // Never steal focus from inputs, textareas, buttons, or the edit panel
     const tag = e.target.tagName.toLowerCase()
     const isBackground = tag === 'rect' || tag === 'svg' || e.target === canvasRef.current
-    if (!isBackground) return
+    const isMiddleClick = e.button === 1
+    const isSpacePan = spaceDown.current && e.button === 0
+
+    // Pan modes:
+    //   1. Click on bare background (original)
+    //   2. Middle mouse button — anywhere on canvas
+    //   3. Space + left click — anywhere on canvas (Figma-style)
+    if (!isBackground && !isMiddleClick && !isSpacePan) return
     if (addingEdge) return
-    e.preventDefault() // prevent focus loss only on background clicks
+    e.preventDefault()
     isPanning.current = true
     panStart.current = { mx: e.clientX, my: e.clientY, px: panRef.current.x, py: panRef.current.y }
     if (canvasRef.current) canvasRef.current.style.cursor = 'grabbing'
+    document.body.style.userSelect = 'none'
   }
 
   function applyZoom(delta, center) {
@@ -1287,7 +1319,12 @@ function FlowBuilder() {
   async function saveNode(nodeId, data) {
     try {
       const updated = await api.updateNode(versionId, nodeId, data)
-      setNodes(prev => prev.map(n => n.id === nodeId ? { ...updated, position: n.position } : n))
+      setNodes(prev => prev.map(n => {
+        if (n.id === nodeId) return { ...updated, position: n.position }
+        // If this save marked a new start node, clear is_start on all others
+        if (data.is_start) return { ...n, is_start: false }
+        return n
+      }))
       setEditingNode(prev => prev?.id === nodeId ? { ...updated, position: prev.position } : prev)
       toast('Node saved')
     } catch (e) { toast(e.message, 'error') }
@@ -1359,6 +1396,8 @@ function FlowBuilder() {
 
   function onMouseDown(e, nodeId) {
     if (e.button !== 0) return
+    // Space held = pan mode, let event bubble to canvas handler
+    if (spaceDown.current) return
     if (addingEdge && addingEdge !== nodeId) {
       setEdgeModal({ sourceId: addingEdge, targetId: nodeId })
       return
@@ -1407,7 +1446,7 @@ function FlowBuilder() {
       if (isPanning.current) {
         isPanning.current = false
         if (canvasRef.current) canvasRef.current.style.cursor = ''
-        // Sync pan state once on release
+        document.body.style.userSelect = ''
         setPan({ ...panRef.current })
         return
       }
@@ -1420,7 +1459,10 @@ function FlowBuilder() {
     }
     window.addEventListener('mousemove', onMouseMove)
     window.addEventListener('mouseup', onMouseUp)
-    return () => { window.removeEventListener('mousemove', onMouseMove); window.removeEventListener('mouseup', onMouseUp) }
+    return () => {
+      window.removeEventListener('mousemove', onMouseMove)
+      window.removeEventListener('mouseup', onMouseUp)
+    }
   }, [versionId])
 
   if (loading) return (
@@ -1551,7 +1593,7 @@ function FlowBuilder() {
           {/* Fixed dot-grid background — does NOT zoom/pan */}
           <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
             <defs>
-              <pattern id="dots" x={pan.x % 20} y={pan.y % 20} width="20" height="20" patternUnits="userSpaceOnUse">
+              <pattern ref={bgPatternRef} id="dots" x={pan.x % 20} y={pan.y % 20} width="20" height="20" patternUnits="userSpaceOnUse">
                 <circle cx="1" cy="1" r="1" fill="var(--border)" />
               </pattern>
             </defs>
@@ -1580,11 +1622,11 @@ function FlowBuilder() {
 
           {/* Hint — fixed to viewport */}
           <div style={{ position: 'absolute', bottom: '20px', right: '20px', zIndex: 50, fontFamily: 'var(--mono)', fontSize: '10px', color: 'var(--text3)', pointerEvents: 'none' }}>
-            scroll to zoom · drag canvas to pan
+            scroll to zoom · space+drag or middle-click to pan
           </div>
 
           {/* ── Transform layer — zoom + pan applied here ── */}
-          <div style={{ position: 'absolute', inset: 0, transformOrigin: '0 0', transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})` }}>
+          <div ref={transformLayerRef} style={{ position: 'absolute', inset: 0, transformOrigin: '0 0', transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`, willChange: 'transform' }}>
 
             {/* Edges SVG — large canvas so edges always render */}
             <svg ref={svgRef} style={{ position: 'absolute', left: 0, top: 0, width: '8000px', height: '8000px', pointerEvents: 'none', overflow: 'visible' }}>
@@ -1782,36 +1824,45 @@ function ToolbarBtn({ onClick, label, color }) {
   )
 }
 
-function EdgeLabelModal({ onConfirm, onClose }) {
-  const [label, setLabel] = useState('')
+function EdgeLabelModal({ onConfirm, onClose, initial = '', title = 'CONNECTION LABEL' }) {
+  const [label, setLabel] = useState(initial)
   const inputRef = useRef(null)
-  useEffect(() => { setTimeout(() => inputRef.current?.focus(), 50) }, [])
+  const isEdit = initial !== ''
 
-  function handleSubmit(e) {
-    e.preventDefault()
-    onConfirm(label.trim()) // allow empty label
+  useEffect(() => {
+    setTimeout(() => {
+      if (inputRef.current) {
+        inputRef.current.focus()
+        inputRef.current.select() // select all so user can type to replace or edit
+      }
+    }, 50)
+  }, [])
+
+  function handleSubmit() {
+    onConfirm(label.trim())
   }
 
   return (
-    <Modal title="CONNECTION LABEL" onClose={onClose}>
+    <Modal title={title} onClose={onClose}>
       <p style={{ color: 'var(--text3)', fontSize: '13px', marginBottom: '16px', lineHeight: 1.6 }}>
-        Label this connection — use anything that describes the path (e.g. "Card expired", "Try again", "Escalate to billing").
-        Leave blank to have no label.
+        {isEdit
+          ? 'Edit the connection label below. Leave blank to remove it.'
+          : 'Label this connection — describe the path (e.g. "Card expired", "Escalate to billing"). Leave blank for no label.'}
       </p>
       <input
         ref={inputRef}
         value={label}
         onChange={e => setLabel(e.target.value)}
-        onKeyDown={e => e.key === 'Enter' && handleSubmit(e)}
+        onKeyDown={e => { if (e.key === 'Enter') handleSubmit(); if (e.key === 'Escape') onClose() }}
         placeholder="e.g. Card expired, Not resolved, Try again…"
-        style={{ width: '100%', padding: '11px 13px', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: '6px', color: 'var(--text)', fontSize: '14px', outline: 'none', transition: 'border-color 0.15s', marginBottom: '20px' }}
+        style={{ width: '100%', padding: '11px 13px', background: 'var(--surface2)', border: '1px solid var(--accent)', borderRadius: '6px', color: 'var(--text)', fontSize: '14px', outline: 'none', transition: 'border-color 0.15s', marginBottom: '20px' }}
         onFocus={e => e.target.style.borderColor = 'var(--accent)'}
         onBlur={e => e.target.style.borderColor = 'var(--border)'}
       />
       <div style={{ display: 'flex', gap: '10px' }}>
         <button onClick={handleSubmit}
           style={{ flex: 1, padding: '10px', background: 'var(--accent)', color: '#fff', borderRadius: '6px', fontSize: '13px', fontWeight: 500 }}>
-          Add Connection
+          {isEdit ? 'Update Label' : 'Add Connection'}
         </button>
         <button onClick={onClose}
           style={{ padding: '10px 16px', border: '1px solid var(--border)', color: 'var(--text2)', borderRadius: '6px', fontSize: '13px' }}>
