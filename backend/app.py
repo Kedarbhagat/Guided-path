@@ -1,5 +1,7 @@
 import uuid
 import time
+import json
+import re
 from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, g
 from flask_sqlalchemy import SQLAlchemy
@@ -7,6 +9,13 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 from sqlalchemy import func, text, or_
 import os
+
+try:
+    from google import genai as _genai
+    from google.genai import types as _genai_types
+    GEMINI_AVAILABLE = True
+except ImportError:
+    GEMINI_AVAILABLE = False
 
 load_dotenv()
 
@@ -1006,6 +1015,387 @@ def _session_state(session):
     else:
         response["options"] = []
     return response
+
+
+# ─── TEXT TO FLOW (Google Gemini) ────────────────────────────
+
+def _parse_ai_json(raw_text):
+    """
+    Robustly extract and parse a JSON object from AI output.
+    Handles markdown fences, leading/trailing prose, trailing commas,
+    and other common AI formatting quirks. Returns parsed dict or None.
+    """
+    if not raw_text:
+        return None
+
+    text = raw_text.strip()
+
+    # 1. Strip markdown code fences (```json ... ``` or ``` ... ```)
+    text = re.sub(r'^```(?:json)?\s*', '', text, flags=re.IGNORECASE)
+    text = re.sub(r'\s*```\s*$', '', text)
+    text = text.strip()
+
+    # 2. Try direct parse first (cheapest path)
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        pass
+
+    # 3. Extract the outermost {...} block -- handles prose before/after JSON
+    brace_start = text.find('{')
+    brace_end = text.rfind('}')
+    if brace_start != -1 and brace_end > brace_start:
+        candidate = text[brace_start:brace_end + 1]
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            pass
+
+        # 4. Fix trailing commas before } or ] -- a very common AI mistake
+        fixed = re.sub(r',\s*([}\]])', r'\1', candidate)
+        try:
+            return json.loads(fixed)
+        except json.JSONDecodeError:
+            pass
+
+        # 5. Fix single-quoted strings -> double-quoted
+        fixed2 = re.sub(r"(?<![\\])'", '"', fixed)
+        try:
+            return json.loads(fixed2)
+        except json.JSONDecodeError:
+            pass
+
+    # 6. Truncation recovery: walk character-by-character tracking bracket depth
+    #    so we can close any open brackets and parse whatever arrived completely.
+    #    This handles responses cut off mid-string or mid-object by token limits.
+    if brace_start != -1:
+        candidate = text[brace_start:]
+        depth_curly = 0
+        depth_square = 0
+        in_string = False
+        escape_next = False
+        last_complete_node_end = -1  # position after the last fully-closed node object
+
+        for i, ch in enumerate(candidate):
+            if escape_next:
+                escape_next = False
+                continue
+            if in_string:
+                if ch == '\\':
+                    escape_next = True
+                elif ch == '"':
+                    in_string = False
+                continue
+            if ch == '"':
+                in_string = True
+                continue
+            if ch == '{':
+                depth_curly += 1
+            elif ch == '}':
+                depth_curly -= 1
+                # A depth_curly==1 here means we just closed an item inside the
+                # top-level object (e.g. a node), depth==0 means top-level closed.
+                if depth_curly >= 1 and depth_square == 1:
+                    last_complete_node_end = i  # end of a fully-closed array item
+            elif ch == '[':
+                depth_square += 1
+            elif ch == ']':
+                depth_square -= 1
+
+        # Build a set of candidates to try, from most to least complete
+        attempts_to_try = []
+
+        # Attempt A: close open brackets at the exact truncation point
+        closing = ']' * max(0, depth_square) + '}' * max(0, depth_curly)
+        attempts_to_try.append(candidate + closing)
+
+        # Attempt B: rewind to the last fully-closed array item, then close
+        if last_complete_node_end > 0:
+            truncated_at_last_good = candidate[:last_complete_node_end + 1]
+            # Strip trailing comma if any, then close remaining brackets
+            truncated_at_last_good = truncated_at_last_good.rstrip().rstrip(',')
+            # We need to close: the nodes array ] + the root object }
+            attempts_to_try.append(truncated_at_last_good + "]}")
+
+        for attempt in attempts_to_try:
+            attempt = re.sub(r',\s*([}\]])', r'\1', attempt)
+            try:
+                result = json.loads(attempt)
+                if isinstance(result, dict) and result.get("nodes"):
+                    return result
+            except json.JSONDecodeError:
+                pass
+
+    return None
+
+
+TEXT_TO_FLOW_PROMPT = """You are a flow builder expert. Convert a natural language description into a structured decision/resolution flow used by support agents.
+
+Return ONLY a valid JSON object with this exact structure (no markdown, no explanation):
+{
+  "nodes": [
+    {
+      "id": "0",
+      "title": "Short question or step title",
+      "type": "question",
+      "body": "Optional longer explanation or context for this step",
+      "is_start": true,
+      "position": {"x": 60, "y": 60}
+    }
+  ],
+  "edges": [
+    {
+      "source": "0",
+      "target": "1",
+      "label": "yes"
+    }
+  ],
+  "suggestions": ["Any suggestions for improving the flow"]
+}
+
+CRITICAL: All node "id" values and edge "source"/"target" values MUST be strings (e.g. "0", "1", "2").
+
+Node type rules:
+- "question": any step where the agent asks something, checks something, or takes an action
+- "result": final outcomes — resolutions, escalations, solutions, dead ends
+- Exactly ONE node must have "is_start": true — the entry point of the flow
+- Every branch must eventually reach a "result" node
+- Result nodes should have a "body" that describes the resolution steps
+
+Position rules:
+- Start node at x=60, y=60
+- Space nodes 300px apart horizontally, 180px apart vertically
+- Branch left/right for yes/no decisions, continue downward for linear steps
+- Ensure no two nodes share the same position
+
+Edge rules:
+- source and target are the STRING "id" values of nodes
+- Every edge must reference valid node IDs that exist in the nodes array
+- label should be short: "yes", "no", "resolved", "escalate", "restart", etc.
+- Every "question" node must have at least one outgoing edge
+
+Quality rules:
+- Keep titles short (under 60 chars) — they appear in UI buttons
+- Body can be longer — it gives context to the agent
+- Create realistic, practical flows an agent would actually use
+- Don't over-engineer: 5-15 nodes is ideal for most flows
+- Capture ALL branches described, including escalation paths and dead ends
+
+Return ONLY the JSON object. No markdown fences. No explanation. No trailing text."""
+
+
+@app.post("/api/v1/flows/generate-from-text")
+def generate_flow_from_text():
+    """Generate a flow from a natural language description using Google Gemini."""
+    if not GEMINI_AVAILABLE:
+        return jsonify({"error": "google-genai not installed. Run: pip install google-genai"}), 503
+
+    api_key = os.getenv("GEMINI_API_KEY")
+    if not api_key:
+        return jsonify({"error": "GEMINI_API_KEY not configured. Add it to your .env file."}), 503
+
+    data = request.get_json(silent=True) or {}
+    description = (data.get("description") or "").strip()
+
+    if not description:
+        return jsonify({"error": "Missing description"}), 400
+    if len(description) < 10:
+        return jsonify({"error": "Description is too short. Please describe your flow in more detail."}), 400
+    if len(description) > 5000:
+        return jsonify({"error": "Description is too long. Please keep it under 5000 characters."}), 400
+
+    try:
+        client = _genai.Client(api_key=api_key)
+
+        # Schema constrains Gemini to output exactly our required structure
+        # This is the most reliable way to get valid JSON — enforced at token level
+        FLOW_SCHEMA = _genai_types.Schema(
+            type=_genai_types.Type.OBJECT,
+            required=["nodes", "edges"],
+            properties={
+                "nodes": _genai_types.Schema(
+                    type=_genai_types.Type.ARRAY,
+                    items=_genai_types.Schema(
+                        type=_genai_types.Type.OBJECT,
+                        required=["id", "title", "type", "is_start"],
+                        properties={
+                            "id": _genai_types.Schema(type=_genai_types.Type.STRING),
+                            "title": _genai_types.Schema(type=_genai_types.Type.STRING),
+                            "type": _genai_types.Schema(
+                                type=_genai_types.Type.STRING,
+                                enum=["question", "result"],
+                            ),
+                            "body": _genai_types.Schema(type=_genai_types.Type.STRING),
+                            "resolution": _genai_types.Schema(type=_genai_types.Type.STRING),
+                            "is_start": _genai_types.Schema(type=_genai_types.Type.BOOLEAN),
+                            "position": _genai_types.Schema(
+                                type=_genai_types.Type.OBJECT,
+                                properties={
+                                    "x": _genai_types.Schema(type=_genai_types.Type.NUMBER),
+                                    "y": _genai_types.Schema(type=_genai_types.Type.NUMBER),
+                                },
+                            ),
+                        },
+                    ),
+                ),
+                "edges": _genai_types.Schema(
+                    type=_genai_types.Type.ARRAY,
+                    items=_genai_types.Schema(
+                        type=_genai_types.Type.OBJECT,
+                        required=["source", "target"],
+                        properties={
+                            "source": _genai_types.Schema(type=_genai_types.Type.STRING),
+                            "target": _genai_types.Schema(type=_genai_types.Type.STRING),
+                            "label": _genai_types.Schema(type=_genai_types.Type.STRING),
+                        },
+                    ),
+                ),
+                "suggestions": _genai_types.Schema(
+                    type=_genai_types.Type.ARRAY,
+                    items=_genai_types.Schema(type=_genai_types.Type.STRING),
+                ),
+            },
+        )
+
+        def _call_gemini(temperature):
+            return client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=f"Convert this flow description into a structured JSON flow:\n\n{description}",
+                config=_genai_types.GenerateContentConfig(
+                    system_instruction=TEXT_TO_FLOW_PROMPT,
+                    temperature=temperature,
+                    max_output_tokens=8192,
+                    response_mime_type="application/json",
+                    response_schema=FLOW_SCHEMA,
+                ),
+            )
+
+        def _check_truncated(response):
+            """Return True if the response was cut off before finishing."""
+            try:
+                candidate = response.candidates[0]
+                reason = str(candidate.finish_reason)
+                # finish_reason MAX_TOKENS means output was cut off
+                return "MAX_TOKENS" in reason or reason == "2"
+            except Exception:
+                return False
+
+        # First attempt
+        response = _call_gemini(temperature=0.2)
+        raw_text = response.text.strip() if response.text else ""
+
+        if _check_truncated(response):
+            app.logger.warning("Gemini response truncated (MAX_TOKENS). Asking for a shorter flow.")
+            # Ask for a more concise flow that fits within the token budget
+            response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=(
+                    f"Convert this flow description into a CONCISE JSON flow (max 10 nodes).\n\n{description}"
+                ),
+                config=_genai_types.GenerateContentConfig(
+                    system_instruction=TEXT_TO_FLOW_PROMPT,
+                    temperature=0,
+                    max_output_tokens=8192,
+                    response_mime_type="application/json",
+                    response_schema=FLOW_SCHEMA,
+                ),
+            )
+            raw_text = response.text.strip() if response.text else ""
+
+        parsed = _parse_ai_json(raw_text)
+        if parsed is None:
+            app.logger.warning("First Gemini call returned unparseable JSON, retrying. Raw: %s", raw_text[:200])
+            response2 = _call_gemini(temperature=0)
+            raw_text = response2.text.strip() if response2.text else ""
+            parsed = _parse_ai_json(raw_text)
+
+        if parsed is None:
+            app.logger.error("Both Gemini calls failed to return valid JSON. Raw: %s", raw_text[:500])
+            return jsonify({
+                "error": "AI returned malformed JSON. Please try again — if this keeps happening, try shortening your description.",
+                "raw": raw_text[:300],
+            }), 500
+
+        nodes = parsed.get("nodes", [])
+        edges = parsed.get("edges", [])
+        suggestions = parsed.get("suggestions", [])
+
+        if not isinstance(nodes, list) or len(nodes) == 0:
+            return jsonify({"error": "AI could not generate a flow from that description. Please try being more specific."}), 422
+
+        # Normalize all node IDs to strings for consistent cross-referencing
+        for i, node in enumerate(nodes):
+            # If the AI omitted an id, assign one; always stringify for consistency
+            raw_id = node.get("id")
+            node["id"] = str(raw_id) if raw_id is not None else str(i)
+            node.setdefault("title", f"Step {i + 1}")
+            # Enforce valid type
+            node["type"] = "result" if node.get("type") == "result" else "question"
+            node.setdefault("body", "")
+            node.setdefault("resolution", "")
+            node.setdefault("is_start", False)
+            node.setdefault("position", {"x": (i % 4) * 300 + 60, "y": (i // 4) * 180 + 60})
+            # Ensure position values are numeric
+            pos = node["position"]
+            if not isinstance(pos.get("x"), (int, float)):
+                pos["x"] = (i % 4) * 300 + 60
+            if not isinstance(pos.get("y"), (int, float)):
+                pos["y"] = (i // 4) * 180 + 60
+
+        start_nodes = [n for n in nodes if n.get("is_start")]
+        if len(start_nodes) == 0 and nodes:
+            nodes[0]["is_start"] = True
+            suggestions.append("Could not determine start node — defaulted to first node.")
+        elif len(start_nodes) > 1:
+            for n in start_nodes[1:]:
+                n["is_start"] = False
+            suggestions.append("Multiple start nodes detected — kept only the first.")
+
+        # Validate edges: compare as strings to match normalized node IDs
+        node_ids = {n["id"] for n in nodes}
+        valid_edges = []
+        skipped = []
+        for edge in edges:
+            src = str(edge.get("source")) if edge.get("source") is not None else None
+            tgt = str(edge.get("target")) if edge.get("target") is not None else None
+            edge["source"] = src
+            edge["target"] = tgt
+            edge.setdefault("label", "")
+            if src in node_ids and tgt in node_ids:
+                valid_edges.append(edge)
+            else:
+                skipped.append(f"Skipped edge {src} -> {tgt}: unknown node ID.")
+        if skipped:
+            suggestions.extend(skipped)
+
+        # Warn if any question node has no outgoing edges
+        question_ids = {n["id"] for n in nodes if n["type"] == "question"}
+        edge_sources = {e["source"] for e in valid_edges}
+        orphan_questions = question_ids - edge_sources
+        for oid in orphan_questions:
+            node_title = next((n["title"] for n in nodes if n["id"] == oid), oid)
+            suggestions.append(f"Question node '{node_title}' has no outgoing connections — it may be a dead end.")
+
+        audit("flow.generate_from_text", payload={
+            "description_length": len(description),
+            "node_count": len(nodes),
+            "edge_count": len(valid_edges),
+        })
+
+        return jsonify({
+            "nodes": nodes,
+            "edges": valid_edges,
+            "suggestions": suggestions,
+            "meta": {"model": "gemini-2.5-flash"},
+        })
+
+    except Exception as e:
+        err_str = str(e).lower()
+        if "api_key" in err_str or "api key" in err_str or "invalid" in err_str:
+            return jsonify({"error": "Invalid Gemini API key. Check GEMINI_API_KEY in your .env file."}), 503
+        if "quota" in err_str or "rate" in err_str or "429" in err_str:
+            return jsonify({"error": "Rate limit reached. Please wait a moment and try again."}), 429
+        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
 
 
 # ─── INIT ─────────────────────────────────────────────────

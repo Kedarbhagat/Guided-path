@@ -17,20 +17,13 @@ async function req(method, path, body) {
 }
 
 // ── Visio XML parser ──────────────────────────────────────────
-// Handles the full .vsdx XML structure:
-//   masters.xml  → shape stencil definitions (Process, Decision, Terminator…)
-//   page1.xml    → Shape[Type=Shape] nodes + Shape[Type=Edge] connectors + Connect wiring
-
-// Shape masters that map to result/terminator nodes
 const RESULT_MASTERS = new Set([
   'terminator', 'start/end', 'start', 'end', 'terminal',
 ])
-// Shape masters that are connectors (skip as nodes)
 const CONNECTOR_MASTERS = new Set([
   'dynamic connector', 'straight connector', 'curved connector',
   'elbow connector', 'connector',
 ])
-// Shape masters that are decision/question nodes
 const QUESTION_MASTERS = new Set([
   'decision', 'process', 'operation', 'predefined process',
   'alternate process', 'data', 'document', 'multi-document',
@@ -41,7 +34,6 @@ const QUESTION_MASTERS = new Set([
 ])
 
 function parseMasters(mastersXml) {
-  // Returns Map<masterID, { nameU, name }>
   const masterMap = new Map()
   if (!mastersXml) return masterMap
   const doc = new DOMParser().parseFromString(mastersXml, 'text/xml')
@@ -56,41 +48,25 @@ function parseMasters(mastersXml) {
 
 function classifyShape(masterInfo, labelText) {
   const label = (labelText || '').toLowerCase()
-
   if (!masterInfo) {
-    // No master info — fall back to label heuristics
     if (label.includes('escalat') || label.includes('resolv') || label.startsWith('result')) return 'result'
     return 'question'
   }
-
   const { nameU, name } = masterInfo
   const masterKey = nameU || name
-
   if (RESULT_MASTERS.has(masterKey)) return 'result'
-  if (CONNECTOR_MASTERS.has(masterKey)) return 'connector' // will be skipped
-  // Everything else (Decision, Process, etc.) → question
+  if (CONNECTOR_MASTERS.has(masterKey)) return 'connector'
   return 'question'
-}
-
-function isStartShape(masterInfo, labelText) {
-  const label = (labelText || '').toLowerCase()
-  if (!masterInfo) return false
-  const key = masterInfo.nameU || masterInfo.name
-  // Visio "Start/End" master — first occurrence is the start
-  if (key === 'start/end' || key === 'start' || key === 'terminator') return true
-  return false
 }
 
 function parseVisioXml(pageXml, mastersXml) {
   const masterMap = parseMasters(mastersXml)
   const doc = new DOMParser().parseFromString(pageXml, 'text/xml')
-
   const nodes = []
   const edges = []
-  const idMap = {}   // visio shape ID → tempId
+  const idMap = {}
   let nodeIndex = 0
 
-  // ── Step 1: Build connector wire map from <Connects> ──────
   const connectorMap = {}
   doc.querySelectorAll('Connect').forEach(c => {
     const fromSheet = c.getAttribute('FromSheet')
@@ -101,7 +77,6 @@ function parseVisioXml(pageXml, mastersXml) {
     if (fromPart === '12') connectorMap[fromSheet].to   = toSheet
   })
 
-  // ── Step 2: Collect raw shapes (no type assignment yet) ────
   const rawShapes = []
   doc.querySelectorAll('Shape').forEach(shape => {
     const shapeId    = shape.getAttribute('ID')
@@ -134,37 +109,18 @@ function parseVisioXml(pageXml, mastersXml) {
     rawShapes.push({ shapeId, masterInfo, masterKey, isTerminator, label, pinX, pinY })
   })
 
-  // ── Step 3: Determine start node BEFORE assigning types ────
-  // Strategy: the start node is the shape that NO connector points TO.
-  // i.e. it has no incoming edges. This is graph-theoretically correct
-  // regardless of position or shape type.
-  const allTargetIds = new Set(
-    edges.map(e => e._visioTgtId).filter(Boolean)
-  )
-  const nodeShapeIds = new Set(rawShapes.map(s => s.shapeId))
-
-  // Find shapes with no incoming edges (not a target of any connector)
+  const allTargetIds = new Set(edges.map(e => e._visioTgtId).filter(Boolean))
   const noIncoming = rawShapes.filter(s => !allTargetIds.has(s.shapeId))
-
-  // Among those, prefer a terminator/start shape, else take topmost-leftmost
   const startShape =
     noIncoming.find(s => s.isTerminator) ||
     noIncoming.sort((a, b) => b.pinY - a.pinY || a.pinX - b.pinX)[0] ||
     rawShapes.sort((a, b) => b.pinY - a.pinY || a.pinX - b.pinX)[0]
-
   const startShapeId = startShape?.shapeId || null
 
-  // ── Step 4: Build nodes with correct type assignment ───────
   rawShapes.forEach(({ shapeId, masterInfo, masterKey, isTerminator, label, pinX, pinY }) => {
     const x = Math.round(pinX * 96)
     const y = Math.round((11 - pinY) * 96)
-
     const isStart = shapeId === startShapeId
-
-    // Type logic:
-    // - START node → always 'question' (entry point, never an endpoint)
-    // - Other terminators → 'result'
-    // - Everything else → classifyShape
     let nodeType
     if (isStart) {
       nodeType = 'question'
@@ -177,20 +133,13 @@ function parseVisioXml(pageXml, mastersXml) {
 
     const tempId = `import-node-${nodeIndex++}`
     idMap[shapeId] = tempId
-
     nodes.push({
-      tempId,
-      visioId: shapeId,
-      title: label,
-      type: nodeType,
+      tempId, visioId: shapeId, title: label, type: nodeType,
       position: { x: Math.max(20, x), y: Math.max(20, y) },
-      body: '',
-      is_start: isStart,
-      _masterName: masterKey || 'unknown',
+      body: '', is_start: isStart, _masterName: masterKey || 'unknown',
     })
   })
 
-  // ── Step 3: Resolve edge node IDs ─────────────────────────
   edges.forEach(edge => {
     edge.sourceId = idMap[edge._visioSrcId] || null
     edge.targetId = idMap[edge._visioTgtId] || null
@@ -198,10 +147,8 @@ function parseVisioXml(pageXml, mastersXml) {
     delete edge._visioTgtId
   })
 
-  // Filter out edges where we couldn't resolve both endpoints
   const validEdges = edges.filter(e => e.sourceId && e.targetId)
 
-  // ── Step 4: Fallback start node if none detected ───────────
   if (!nodes.some(n => n.is_start) && nodes.length > 0) {
     const sorted = [...nodes].sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x)
     const fallback = nodes.find(n => n.tempId === sorted[0].tempId)
@@ -232,7 +179,6 @@ function PreviewCanvas({ nodes, edges, selectedId, onSelect }) {
         </defs>
         <rect width="100%" height="100%" fill="url(#prev-dots)" />
 
-        {/* Edges */}
         {edges.map(edge => {
           const src = nodes.find(n => n.tempId === edge.sourceId)
           const tgt = nodes.find(n => n.tempId === edge.targetId)
@@ -256,34 +202,27 @@ function PreviewCanvas({ nodes, edges, selectedId, onSelect }) {
           )
         })}
 
-        {/* Nodes */}
         {nodes.map(node => {
           const typeColor = node.type === 'result' ? '#22c55e' : '#4a8fff'
           const isSelected = selectedId === node.tempId
           return (
-            <g key={node.tempId} onClick={() => onSelect(node.tempId)}
-              style={{ cursor: 'pointer' }}>
+            <g key={node.tempId} onClick={() => onSelect(node.tempId)} style={{ cursor: 'pointer' }}>
               <rect x={node.position.x} y={node.position.y} width={NODE_W} height={NODE_H}
                 rx="8" ry="8"
                 fill={isSelected ? '#0d1a3a' : '#111827'}
                 stroke={isSelected ? typeColor : '#2a3a5a'}
                 strokeWidth={isSelected ? 2 : 1.5} />
-              {/* type bar */}
-              <rect x={node.position.x} y={node.position.y} width={4} height={NODE_H}
-                rx="2" fill={typeColor} />
-              {/* start badge */}
+              <rect x={node.position.x} y={node.position.y} width={4} height={NODE_H} rx="2" fill={typeColor} />
               {node.is_start && (
                 <text x={node.position.x + 14} y={node.position.y + 16}
                   style={{ fontSize: '8px', fill: '#4a8fff', fontFamily: 'monospace', fontWeight: 'bold' }}>
                   START
                 </text>
               )}
-              {/* type label */}
               <text x={node.position.x + 14} y={node.position.y + (node.is_start ? 30 : 22)}
                 style={{ fontSize: '9px', fill: typeColor, fontFamily: 'monospace', textTransform: 'uppercase' }}>
                 {node.type}
               </text>
-              {/* title */}
               <foreignObject x={node.position.x + 14} y={node.position.y + 36}
                 width={NODE_W - 24} height={NODE_H - 44}>
                 <div xmlns="http://www.w3.org/1999/xhtml"
@@ -308,7 +247,6 @@ function NodeEditor({ node, edges, allNodes, onChange, onEdgeChange, onAddEdge, 
   )
 
   const nodeEdges = edges.filter(e => e.sourceId === node.tempId || e.targetId === node.tempId)
-
   const inp = { width: '100%', padding: '7px 10px', background: '#0d1120', border: '1px solid #2a3a5a', borderRadius: '5px', color: '#c8d0e0', fontSize: '12px', outline: 'none', fontFamily: 'inherit', lineHeight: 1.4 }
 
   return (
@@ -316,11 +254,10 @@ function NodeEditor({ node, edges, allNodes, onChange, onEdgeChange, onAddEdge, 
       <div style={{ fontFamily: 'monospace', fontSize: '10px', color: '#4a5a7a', letterSpacing: '0.08em', marginBottom: '6px' }}>EDIT NODE</div>
       {node._masterName && node._masterName !== 'unknown' && (
         <div style={{ fontSize: '10px', color: '#3a5a3a', background: '#0a1a0a', border: '1px solid #1a3a1a', borderRadius: '4px', padding: '3px 8px', marginBottom: '12px', fontFamily: 'monospace' }}>
-          Visio shape: <span style={{ color: '#4a9a4a' }}>{node._masterName}</span>
+          Source: <span style={{ color: '#4a9a4a' }}>{node._masterName}</span>
         </div>
       )}
 
-      {/* Type toggle */}
       <div style={{ marginBottom: '14px' }}>
         <div style={{ fontSize: '10px', color: '#4a5a7a', fontFamily: 'monospace', marginBottom: '6px' }}>TYPE</div>
         <div style={{ display: 'flex', gap: '6px' }}>
@@ -333,14 +270,12 @@ function NodeEditor({ node, edges, allNodes, onChange, onEdgeChange, onAddEdge, 
         </div>
       </div>
 
-      {/* Start toggle */}
       <div style={{ marginBottom: '14px', display: 'flex', alignItems: 'center', gap: '8px' }}>
         <input type="checkbox" id="is-start" checked={node.is_start}
           onChange={e => onChange(node.tempId, { is_start: e.target.checked })} />
-        <label htmlFor="is-start" style={{ fontSize: '11px', color: '#8a9ab a', fontFamily: 'monospace', cursor: 'pointer' }}>Mark as START node</label>
+        <label htmlFor="is-start" style={{ fontSize: '11px', color: '#8a9aba', fontFamily: 'monospace', cursor: 'pointer' }}>Mark as START node</label>
       </div>
 
-      {/* Title */}
       <div style={{ marginBottom: '14px' }}>
         <div style={{ fontSize: '10px', color: '#4a5a7a', fontFamily: 'monospace', marginBottom: '6px' }}>TITLE</div>
         <textarea value={node.title} rows={3}
@@ -348,7 +283,6 @@ function NodeEditor({ node, edges, allNodes, onChange, onEdgeChange, onAddEdge, 
           style={{ ...inp, resize: 'vertical' }} />
       </div>
 
-      {/* Description */}
       <div style={{ marginBottom: '14px' }}>
         <div style={{ fontSize: '10px', color: '#4a5a7a', fontFamily: 'monospace', marginBottom: '6px' }}>DESCRIPTION</div>
         <textarea value={node.body} rows={2} placeholder="Optional context…"
@@ -365,7 +299,6 @@ function NodeEditor({ node, edges, allNodes, onChange, onEdgeChange, onAddEdge, 
         </div>
       )}
 
-      {/* Connections from this node */}
       <div style={{ marginTop: '8px' }}>
         <div style={{ fontSize: '10px', color: '#4a5a7a', fontFamily: 'monospace', marginBottom: '8px' }}>CONNECTIONS</div>
         {nodeEdges.length === 0 && (
@@ -390,7 +323,6 @@ function NodeEditor({ node, edges, allNodes, onChange, onEdgeChange, onAddEdge, 
           )
         })}
 
-        {/* Add edge from this node */}
         {node.type !== 'result' && (
           <AddEdgeRow node={node} allNodes={allNodes} edges={edges} onAdd={onAddEdge} />
         )}
@@ -449,16 +381,349 @@ function Steps({ current }) {
             }}>{i < current ? '✓' : i + 1}</div>
             <span style={{ fontSize: '12px', color: i === current ? '#c8d0e0' : '#4a5a7a', fontFamily: 'monospace' }}>{s}</span>
           </div>
-          {i < steps.length - 1 && <div style={{ width: '32px', height: '1px', background: '#1a2a4a', margin: '0 8px' }} />}
+          {i < steps.length - 1 && (
+            <div style={{ width: '32px', height: '1px', background: i < current ? '#22c55e' : '#1a2a4a', margin: '0 8px' }} />
+          )}
         </div>
       ))}
     </div>
   )
 }
 
-// ── Main VisioImportModal ─────────────────────────────────────
+// ── AI Parsing progress animation ────────────────────────────
+function AIParsingOverlay({ fileName, progress, stage }) {
+  const stages = [
+    { key: 'reading', label: 'Reading your description…', icon: '📝' },
+    { key: 'detecting', label: 'Identifying steps & decisions…', icon: '⬡' },
+    { key: 'mapping', label: 'Mapping connections…', icon: '⟶' },
+    { key: 'building', label: 'Building flow structure…', icon: '⚙' },
+  ]
+  const currentIdx = stages.findIndex(s => s.key === stage)
+
+  return (
+    <div style={{
+      flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center',
+      justifyContent: 'center', gap: '24px', padding: '40px 20px',
+    }}>
+      {/* Animated hexagon */}
+      <div style={{ position: 'relative', width: '80px', height: '80px' }}>
+        <svg width="80" height="80" viewBox="0 0 80 80">
+          <polygon points="40,5 72,22.5 72,57.5 40,75 8,57.5 8,22.5"
+            fill="none" stroke="#1a2a4a" strokeWidth="2" />
+          <polygon points="40,5 72,22.5 72,57.5 40,75 8,57.5 8,22.5"
+            fill="none" stroke="#4a8fff" strokeWidth="2"
+            strokeDasharray="200"
+            strokeDashoffset={200 - (progress / 100) * 200}
+            style={{ transition: 'stroke-dashoffset 0.4s ease', transformOrigin: 'center', transform: 'rotate(-90deg)' }} />
+        </svg>
+        <div style={{
+          position: 'absolute', inset: 0, display: 'flex', alignItems: 'center',
+          justifyContent: 'center', fontSize: '28px',
+          animation: 'pulse 1.5s ease-in-out infinite',
+        }}>
+          {stages[currentIdx]?.icon || '🤖'}
+        </div>
+      </div>
+
+      <div style={{ textAlign: 'center' }}>
+        <div style={{ fontSize: '15px', color: '#c8d0e0', fontWeight: 600, marginBottom: '6px' }}>
+          AI is building your flow
+        </div>
+        <div style={{ fontSize: '12px', color: '#4a8fff', fontFamily: 'monospace' }}>
+          {fileName}
+        </div>
+      </div>
+
+      {/* Stage pipeline */}
+      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px', width: '100%', maxWidth: '300px' }}>
+        {stages.map((s, i) => {
+          const done = i < currentIdx
+          const active = i === currentIdx
+          return (
+            <div key={s.key} style={{
+              display: 'flex', alignItems: 'center', gap: '10px',
+              padding: '8px 12px', borderRadius: '6px',
+              background: active ? '#0d1a3a' : done ? '#0a1a0a' : '#0a0e1a',
+              border: `1px solid ${active ? '#4a8fff' : done ? '#1a3a1a' : '#1a2a4a'}`,
+              transition: 'all 0.3s ease',
+              opacity: i > currentIdx ? 0.4 : 1,
+            }}>
+              <div style={{
+                width: '18px', height: '18px', borderRadius: '50%', flexShrink: 0,
+                display: 'flex', alignItems: 'center', justifyContent: 'center',
+                fontSize: '10px', fontFamily: 'monospace',
+                background: done ? '#22c55e' : active ? '#4a8fff' : '#1a2a4a',
+                color: '#fff',
+              }}>
+                {done ? '✓' : i + 1}
+              </div>
+              <span style={{ fontSize: '12px', color: active ? '#c8d0e0' : done ? '#4a9a4a' : '#4a5a7a', fontFamily: 'monospace' }}>
+                {s.label}
+              </span>
+              {active && (
+                <div style={{ marginLeft: 'auto', display: 'flex', gap: '3px' }}>
+                  {[0, 1, 2].map(j => (
+                    <div key={j} style={{
+                      width: '4px', height: '4px', borderRadius: '50%', background: '#4a8fff',
+                      animation: `bounce 0.9s ${j * 0.15}s infinite`,
+                    }} />
+                  ))}
+                </div>
+              )}
+            </div>
+          )
+        })}
+      </div>
+
+      <style>{`
+        @keyframes bounce { 0%,80%,100% { transform: translateY(0); } 40% { transform: translateY(-6px); } }
+        @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.5; } }
+      `}</style>
+    </div>
+  )
+}
+
+// ── Text to Flow Tab ─────────────────────────────────────────
+const EXAMPLE_PROMPTS = [
+  "A customer calls about a billing issue. First ask if the charge is from this month or a previous month. If this month, check if they have an active subscription — if yes, explain the charge and offer a refund if they're unsatisfied, if no, escalate to billing team. If previous month, ask if they've already contacted us — if yes, escalate to a supervisor, if no, process the refund directly.",
+  "Password reset flow: Ask if user remembers their email. If yes, send reset link and confirm receipt. If no, ask for phone number on file. If they have it, verify via SMS code then reset. If not, escalate to account recovery team.",
+  "IT helpdesk: Device won't turn on. Ask if it's plugged in. If no, plug it in and wait 5 mins. If yes, check if the battery light is on. If no light, replace power cable. If light is on, hold power button 10 seconds. If still nothing, escalate to hardware team.",
+]
+
+function TextToFlowTab({ onGenerated, onError }) {
+  const [description, setDescription] = useState('')
+  const [generating, setGenerating] = useState(false)
+  const [genStage, setGenStage] = useState('reading')
+  const [genProgress, setGenProgress] = useState(0)
+  const [charCount, setCharCount] = useState(0)
+
+  function handleChange(e) {
+    setDescription(e.target.value)
+    setCharCount(e.target.value.length)
+  }
+
+  function useExample(text) {
+    setDescription(text)
+    setCharCount(text.length)
+  }
+
+  async function handleGenerate() {
+    if (description.trim().length < 10) {
+      onError('Please describe your flow in more detail (at least a sentence or two).')
+      return
+    }
+    setGenerating(true)
+    setGenProgress(10)
+    setGenStage('reading')
+
+    try {
+      await new Promise(r => setTimeout(r, 400))
+      setGenProgress(30); setGenStage('detecting')
+
+      const res = await fetch(`${BASE}/flows/generate-from-text`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ description: description.trim() }),
+      })
+
+      setGenProgress(65); setGenStage('mapping')
+
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}))
+        const msg = err.error || `Server error ${res.status}`
+        // Surface actionable messages for common failure cases
+        if (res.status === 503) throw new Error(`${msg} (AI service unavailable)`)
+        if (res.status === 429) throw new Error(`${msg} (please wait a moment)`)
+        if (res.status === 422) throw new Error(msg)
+        throw new Error(msg)
+      }
+
+      const data = await res.json()
+      setGenProgress(88); setGenStage('building')
+      await new Promise(r => setTimeout(r, 500))
+      setGenProgress(100)
+
+      // Build a robust id→tempId map: handle both string and number IDs from AI
+      const aiIdToTempId = {}
+      ;(data.nodes || []).forEach((n, i) => {
+        if (n.id !== undefined && n.id !== null) {
+          // Map both the raw value and its string form so lookups always work
+          aiIdToTempId[String(n.id)] = `import-node-${i}`
+        }
+        // Always ensure index-based fallback
+        aiIdToTempId[String(i)] = aiIdToTempId[String(i)] || `import-node-${i}`
+      })
+
+      // Normalize into our node/edge format
+      const nodes = (data.nodes || []).map((n, i) => ({
+        tempId: `import-node-${i}`,
+        title: (n.title || `Step ${i + 1}`).slice(0, 80),
+        type: n.type === 'result' ? 'result' : 'question',
+        body: n.body || n.description || '',
+        position: {
+          x: Math.max(20, typeof n.position?.x === 'number' ? n.position.x : (i % 4) * 300 + 60),
+          y: Math.max(20, typeof n.position?.y === 'number' ? n.position.y : Math.floor(i / 4) * 180 + 60),
+        },
+        is_start: !!(n.is_start),
+        _masterName: 'AI-generated',
+        resolution: n.resolution || '',
+      }))
+
+      if (nodes.length > 0 && !nodes.some(n => n.is_start)) nodes[0].is_start = true
+
+      const rawEdges = (data.edges || [])
+      const edges = rawEdges.map((e, i) => ({
+        tempId: `import-edge-${i}`,
+        sourceId: aiIdToTempId[String(e.source)] ?? null,
+        targetId: aiIdToTempId[String(e.target)] ?? null,
+        label: e.label || '',
+      })).filter(e => e.sourceId && e.targetId)
+
+      const droppedEdgeCount = rawEdges.length - edges.length
+      const warnings = [...(data.suggestions || [])]
+      if (droppedEdgeCount > 0) {
+        warnings.push(`${droppedEdgeCount} connection(s) could not be mapped and were skipped. You can add them manually.`)
+      }
+      if (nodes.length === 0) {
+        throw new Error('AI returned no nodes. Please try rephrasing your description.')
+      }
+
+      setGenerating(false)
+      onGenerated({
+        nodes, edges,
+        warnings,
+        flowName: description.trim().split(/[.!?\n]/)[0].slice(0, 60),
+      })
+    } catch (err) {
+      onError(`Generation failed: ${err.message}`)
+      setGenerating(false)
+    }
+  }
+
+  if (generating) {
+    return <AIParsingOverlay fileName="your description" progress={genProgress} stage={genStage} />
+  }
+
+  const inp = {
+    width: '100%', padding: '12px 14px', background: '#0d1120',
+    border: '1px solid #2a3a5a', borderRadius: '8px', color: '#c8d0e0',
+    fontSize: '13px', outline: 'none', fontFamily: 'inherit', lineHeight: 1.6,
+    resize: 'vertical', boxSizing: 'border-box',
+  }
+
+  return (
+    <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '16px' }}>
+
+      {/* AI badge + label */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '6px',
+          padding: '4px 12px', borderRadius: '20px',
+          background: 'linear-gradient(135deg, #0d1a3a, #1a0d3a)',
+          border: '1px solid #4a2aff', fontSize: '11px', fontFamily: 'monospace', color: '#8a6aff',
+        }}>✦ AI-POWERED</div>
+        <span style={{ fontSize: '12px', color: '#4a5a7a' }}>Describe your flow in plain English</span>
+      </div>
+
+      {/* Textarea */}
+      <div>
+        <div style={{ fontSize: '10px', color: '#4a5a7a', fontFamily: 'monospace', marginBottom: '6px', display: 'flex', justifyContent: 'space-between' }}>
+          <span>YOUR FLOW DESCRIPTION</span>
+          <span style={{ color: charCount > 4500 ? '#ef4444' : '#4a5a7a' }}>{charCount}/5000</span>
+        </div>
+        <textarea
+          value={description}
+          onChange={handleChange}
+          rows={8}
+          placeholder={"Describe your flow in plain language…\n\nExample: A customer calls about a billing issue. First ask if the charge is recent or old. If recent, check their subscription status — if active, explain the charge, if inactive escalate to billing. If old, process a refund directly."}
+          style={inp}
+          onFocus={e => e.target.style.borderColor = '#4a8fff'}
+          onBlur={e => e.target.style.borderColor = '#2a3a5a'}
+        />
+      </div>
+
+      {/* Generate button */}
+      <button
+        onClick={handleGenerate}
+        disabled={description.trim().length < 10}
+        style={{
+          width: '100%', padding: '12px',
+          background: description.trim().length >= 10 ? 'linear-gradient(135deg, #1a2aff, #4a8fff)' : '#0d1120',
+          border: `1px solid ${description.trim().length >= 10 ? '#4a8fff' : '#2a3a5a'}`,
+          borderRadius: '8px', color: description.trim().length >= 10 ? '#fff' : '#3a4a6a',
+          fontSize: '14px', fontWeight: 600, cursor: description.trim().length >= 10 ? 'pointer' : 'not-allowed',
+          transition: 'all 0.2s ease', fontFamily: 'inherit',
+        }}>
+        ✦ Generate Flow with AI
+      </button>
+
+      {/* Example prompts */}
+      <div>
+        <div style={{ fontSize: '10px', color: '#4a5a7a', fontFamily: 'monospace', marginBottom: '8px' }}>EXAMPLE PROMPTS — click to use</div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+          {EXAMPLE_PROMPTS.map((ex, i) => (
+            <button key={i} onClick={() => useExample(ex)}
+              style={{
+                textAlign: 'left', padding: '8px 12px', background: '#0a0e1a',
+                border: '1px solid #1a2a4a', borderRadius: '6px', cursor: 'pointer',
+                color: '#6a7a9a', fontSize: '11px', lineHeight: 1.5, fontFamily: 'inherit',
+                transition: 'border-color 0.15s, color 0.15s',
+              }}
+              onMouseEnter={e => { e.currentTarget.style.borderColor = '#4a8fff'; e.currentTarget.style.color = '#8a9aba' }}
+              onMouseLeave={e => { e.currentTarget.style.borderColor = '#1a2a4a'; e.currentTarget.style.color = '#6a7a9a' }}>
+              {ex.slice(0, 100)}…
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Tips */}
+      <div style={{ padding: '10px 14px', background: '#0a0a00', border: '1px solid #2a2a00', borderRadius: '8px' }}>
+        <div style={{ fontSize: '11px', color: '#4a4a00', fontFamily: 'monospace', marginBottom: '6px' }}>TIPS FOR BEST RESULTS</div>
+        <div style={{ fontSize: '12px', color: '#6a6a30', lineHeight: 1.7 }}>
+          • Describe each decision point and its outcomes<br />
+          • Mention what happens in each branch (yes/no, pass/fail)<br />
+          • Include who handles escalations or dead ends<br />
+          • More detail = better and more accurate flow
+        </div>
+      </div>
+    </div>
+  )
+}
+
+// ── Tab switcher ──────────────────────────────────────────────
+function ImportTypeTabs({ active, onChange }) {
+  const tabs = [
+    { id: 'text', label: '✦ Describe in Text', sub: 'AI-powered' },
+    { id: 'visio', label: '⬡ Visio (.vsdx)', sub: 'Direct parse' },
+  ]
+  return (
+    <div style={{ display: 'flex', gap: '8px', marginBottom: '20px' }}>
+      {tabs.map(t => (
+        <button key={t.id} onClick={() => onChange(t.id)}
+          style={{
+            flex: 1, padding: '10px 16px', borderRadius: '8px', cursor: 'pointer',
+            border: `1px solid ${active === t.id ? '#4a8fff' : '#1a2a4a'}`,
+            background: active === t.id ? '#0d1a3a' : '#0a0e1a',
+            display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '3px',
+            transition: 'all 0.15s ease',
+          }}>
+          <span style={{ fontSize: '13px', color: active === t.id ? '#c8d0e0' : '#4a5a7a', fontWeight: 600 }}>
+            {t.label}
+          </span>
+          <span style={{ fontSize: '10px', fontFamily: 'monospace', color: active === t.id ? '#4a8fff' : '#2a3a5a' }}>
+            {t.sub}
+          </span>
+        </button>
+      ))}
+    </div>
+  )
+}
+
+// ── Main modal ────────────────────────────────────────────────
 export default function VisioImportModal({ onClose, onImported }) {
   const [step, setStep] = useState(0) // 0=upload, 1=review, 2=saving
+  const [importType, setImportType] = useState('text') // 'text' | 'visio'
   const [nodes, setNodes] = useState([])
   const [edges, setEdges] = useState([])
   const [selectedId, setSelectedId] = useState(null)
@@ -470,8 +735,8 @@ export default function VisioImportModal({ onClose, onImported }) {
   const [parseWarnings, setParseWarnings] = useState([])
   const fileRef = useRef()
 
-  // ── Parse uploaded .vsdx ──────────────────────────────────
-  async function handleFile(file) {
+  // ── Visio file handler ────────────────────────────────────
+  async function handleVisioFile(file) {
     setError('')
     if (!file) return
     if (!file.name.endsWith('.vsdx') && !file.name.endsWith('.vsd')) {
@@ -479,16 +744,11 @@ export default function VisioImportModal({ onClose, onImported }) {
       return
     }
 
-    // Default flow name from filename
     setFlowName(file.name.replace(/\.(vsdx|vsd)$/i, '').replace(/[-_]/g, ' '))
 
     try {
       const zip = await JSZip.loadAsync(file)
-
-      // Find the first page XML
-      const pageFiles = Object.keys(zip.files).filter(f =>
-        f.match(/visio\/pages\/page\d+\.xml/i)
-      )
+      const pageFiles = Object.keys(zip.files).filter(f => f.match(/visio\/pages\/page\d+\.xml/i))
 
       if (pageFiles.length === 0) {
         setError('Could not find diagram pages in this file. Make sure it\'s a valid .vsdx file.')
@@ -496,13 +756,7 @@ export default function VisioImportModal({ onClose, onImported }) {
       }
 
       const warnings = []
-      let allNodes = []
-      let allEdges = []
-
-      // Load masters.xml for shape type detection (Process, Decision, Terminator…)
-      const masterFiles = Object.keys(zip.files).filter(f =>
-        f.match(/visio\/masters\/masters\.xml/i)
-      )
+      const masterFiles = Object.keys(zip.files).filter(f => f.match(/visio\/masters\/masters\.xml/i))
       let mastersXml = null
       if (masterFiles.length > 0) {
         mastersXml = await zip.files[masterFiles[0]].async('string')
@@ -510,53 +764,56 @@ export default function VisioImportModal({ onClose, onImported }) {
         warnings.push('No masters file found — shape types will be guessed from labels only.')
       }
 
-      // Parse first page (most flows are single-page)
       const xmlStr = await zip.files[pageFiles[0]].async('string')
       const { nodes: parsedNodes, edges: parsedEdges } = parseVisioXml(xmlStr, mastersXml)
 
-      allNodes = parsedNodes
-      allEdges = parsedEdges
-
-      if (allNodes.length === 0) {
+      if (parsedNodes.length === 0) {
         setError('No shapes with text found on this page. Make sure your shapes have labels.')
         return
       }
 
-      if (allEdges.length === 0) {
+      if (parsedEdges.length === 0) {
         warnings.push('No connectors found — you can add connections manually in the next step.')
       }
 
-      const noStart = !allNodes.some(n => n.is_start)
-      if (noStart) warnings.push('Could not detect a start node — please mark one manually.')
-      
-      // Show detected shape types as info
-      const resultCount = allNodes.filter(n => n.type === 'result').length
-      const questionCount = allNodes.filter(n => n.type === 'question').length
+      if (!parsedNodes.some(n => n.is_start)) {
+        warnings.push('Could not detect a start node — please mark one manually.')
+      }
+
+      const resultCount = parsedNodes.filter(n => n.type === 'result').length
+      const questionCount = parsedNodes.filter(n => n.type === 'question').length
       if (mastersXml) {
         warnings.push(`ℹ Detected ${questionCount} question node${questionCount !== 1 ? 's' : ''} and ${resultCount} result node${resultCount !== 1 ? 's' : ''} from shape types.`)
       }
 
       setParseWarnings(warnings)
-      setNodes(allNodes)
-      setEdges(allEdges)
-      setSelectedId(allNodes[0]?.tempId || null)
+      setNodes(parsedNodes)
+      setEdges(parsedEdges)
+      setSelectedId(parsedNodes[0]?.tempId || null)
       setStep(1)
     } catch (err) {
       setError(`Failed to parse file: ${err.message}`)
     }
   }
 
-  // ── Node/edge update helpers ──────────────────────────────
+  // ── Image AI parse result handler ─────────────────────────
+  function handleImageParsed({ nodes: parsedNodes, edges: parsedEdges, warnings, fileName, flowName: suggestedName }) {
+    // Text-to-flow passes flowName; Visio/image passes fileName
+    const rawName = suggestedName || (fileName ? fileName.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ') : '')
+    setFlowName(rawName)
+    setParseWarnings([
+      'ℹ Flow was generated by AI — please review all nodes, connections, and labels before saving.',
+      ...(warnings || []),
+    ])
+    setNodes(parsedNodes)
+    setEdges(parsedEdges)
+    setSelectedId(parsedNodes[0]?.tempId || null)
+    setStep(1)
+  }
+
+  // ── Node/edge helpers ─────────────────────────────────────
   function updateNode(tempId, changes) {
-    setNodes(prev => prev.map(n => {
-      if (n.tempId !== tempId) return n
-      // If marking as start, unmark all others first
-      if (changes.is_start) {
-        return { ...n, ...changes }
-      }
-      return { ...n, ...changes }
-    }))
-    // Ensure only one start node
+    setNodes(prev => prev.map(n => n.tempId !== tempId ? n : { ...n, ...changes }))
     if (changes.is_start === true) {
       setNodes(prev => prev.map(n =>
         n.tempId === tempId ? { ...n, ...changes } : { ...n, is_start: false }
@@ -594,15 +851,16 @@ export default function VisioImportModal({ onClose, onImported }) {
     setError('')
 
     try {
-      // 1. Create flow
+      // POST /flows already returns flow.to_dict() which includes versions[]
+      // No need for a second GET — avoids a race condition on slow connections
       const flow = await req('POST', '/flows', { name: flowName.trim(), description: flowDesc.trim() })
 
-      // 2. Get the auto-created draft version
-      const flowFull = await req('GET', `/flows/${flow.id}`)
-      const versionId = flowFull.draft_version_id || flowFull.versions?.[0]?.id
-      if (!versionId) throw new Error('Could not find draft version')
+      // Find the draft version: versions are ordered newest-first
+      const draftVersion = (flow.versions || []).find(v => v.status === 'draft')
+      const versionId = draftVersion?.id || (flow.versions || [])[0]?.id
+      if (!versionId) throw new Error('Server did not return a version ID — please try again')
 
-      // 3. Create all nodes and build tempId → real id map
+      // Create all nodes and build a tempId → real server ID map
       const idMap = {}
       for (const node of nodes) {
         const created = await req('POST', `/versions/${versionId}/nodes`, {
@@ -611,27 +869,44 @@ export default function VisioImportModal({ onClose, onImported }) {
           body: node.body || '',
           position: node.position,
           is_start: node.is_start,
-          metadata: node.type === 'result' ? { resolution: node.resolution || '', escalate_to: null } : {},
+          metadata: node.type === 'result'
+            ? { resolution: node.resolution || '', escalate_to: null }
+            : {},
         })
         idMap[node.tempId] = created.id
       }
 
-      // 4. Create all edges
+      // Create edges — collect failures instead of silently dropping them
+      const edgeErrors = []
       for (const edge of edges) {
         const srcId = idMap[edge.sourceId]
         const tgtId = idMap[edge.targetId]
-        if (!srcId || !tgtId) continue
-        await req('POST', `/versions/${versionId}/edges`, {
-          source: srcId,
-          target: tgtId,
-          condition_label: edge.label || '',
-        })
+        if (!srcId || !tgtId) {
+          edgeErrors.push(`Could not map edge ${edge.sourceId} → ${edge.targetId}`)
+          continue
+        }
+        try {
+          await req('POST', `/versions/${versionId}/edges`, {
+            source: srcId,
+            target: tgtId,
+            condition_label: edge.label || '',
+          })
+        } catch (edgeErr) {
+          // 409 = duplicate edge (shouldn't happen on fresh import, but handle gracefully)
+          if (!edgeErr.message.includes('409') && !edgeErr.message.toLowerCase().includes('already exists')) {
+            edgeErrors.push(`Edge "${edge.label || '(unlabelled)'}": ${edgeErr.message}`)
+          }
+        }
       }
 
-      // 5. Publish the version so it's immediately runnable
+      if (edgeErrors.length > 0) {
+        console.warn('Some edges could not be saved:', edgeErrors)
+        setParseWarnings(prev => [...prev, ...edgeErrors.map(e => `⚠ ${e}`)])
+      }
+
       if (publishAfterSave) {
         await req('POST', `/flows/${flow.id}/versions/${versionId}/publish`, {
-          change_notes: 'Imported from Visio'
+          change_notes: `Imported from ${importType === 'text' ? 'text description (AI)' : 'Visio'}`
         })
       }
 
@@ -644,7 +919,6 @@ export default function VisioImportModal({ onClose, onImported }) {
 
   const selectedNode = nodes.find(n => n.tempId === selectedId)
 
-  // ── Styles ────────────────────────────────────────────────
   const overlayStyle = {
     position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.75)',
     display: 'flex', alignItems: 'center', justifyContent: 'center',
@@ -652,9 +926,10 @@ export default function VisioImportModal({ onClose, onImported }) {
   }
   const modalStyle = {
     background: '#080c14', border: '1px solid #1a2a4a', borderRadius: '12px',
-    width: '100%', maxWidth: step === 1 ? '1100px' : '480px',
+    width: '100%', maxWidth: step === 1 ? '1100px' : '520px',
     maxHeight: '90vh', display: 'flex', flexDirection: 'column',
     overflow: 'hidden', boxShadow: '0 24px 80px rgba(0,0,0,0.6)',
+    transition: 'max-width 0.3s ease',
   }
 
   return (
@@ -665,14 +940,17 @@ export default function VisioImportModal({ onClose, onImported }) {
         <div style={{ padding: '20px 24px', borderBottom: '1px solid #1a2a4a', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
           <div>
             <div style={{ fontFamily: 'monospace', fontSize: '13px', fontWeight: 600, color: '#c8d0e0', letterSpacing: '0.05em' }}>
-              IMPORT FROM VISIO
+              CREATE FLOW
             </div>
             <div style={{ fontSize: '11px', color: '#4a5a7a', marginTop: '2px' }}>
-              Upload a .vsdx file to generate your flow automatically
+              {step === 0
+                ? 'Describe your flow in plain English, or import from Visio'
+                : 'Review and edit the detected flow before saving'
+              }
             </div>
           </div>
           <button onClick={onClose}
-            style={{ color: '#4a5a7a', fontSize: '20px', width: '32px', height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '6px', transition: 'color 0.15s' }}
+            style={{ color: '#4a5a7a', fontSize: '20px', width: '32px', height: '32px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '6px', transition: 'color 0.15s', background: 'none', border: 'none', cursor: 'pointer' }}
             onMouseEnter={e => e.currentTarget.style.color = '#c8d0e0'}
             onMouseLeave={e => e.currentTarget.style.color = '#4a5a7a'}>×</button>
         </div>
@@ -682,41 +960,54 @@ export default function VisioImportModal({ onClose, onImported }) {
 
           {/* ── STEP 0: Upload ── */}
           {step === 0 && (
-            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
-              <input ref={fileRef} type="file" accept=".vsdx,.vsd" style={{ display: 'none' }}
-                onChange={e => handleFile(e.target.files[0])} />
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+              <ImportTypeTabs active={importType} onChange={t => { setImportType(t); setError('') }} />
 
-              <div
-                onClick={() => fileRef.current.click()}
-                onDragOver={e => { e.preventDefault(); e.currentTarget.style.borderColor = '#4a8fff' }}
-                onDragLeave={e => { e.currentTarget.style.borderColor = '#2a3a5a' }}
-                onDrop={e => { e.preventDefault(); e.currentTarget.style.borderColor = '#2a3a5a'; handleFile(e.dataTransfer.files[0]) }}
-                style={{
-                  width: '100%', maxWidth: '360px', padding: '48px 32px',
-                  border: '2px dashed #2a3a5a', borderRadius: '12px',
-                  display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px',
-                  cursor: 'pointer', transition: 'border-color 0.2s, background 0.2s',
-                  background: '#0a0e1a',
-                }}
-                onMouseEnter={e => { e.currentTarget.style.borderColor = '#4a8fff'; e.currentTarget.style.background = '#0d1220' }}
-                onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a3a5a'; e.currentTarget.style.background = '#0a0e1a' }}>
-                <div style={{ fontSize: '36px', opacity: 0.5 }}>⬡</div>
-                <div style={{ fontSize: '14px', color: '#8a9aba', fontWeight: 500 }}>Drop your .vsdx file here</div>
-                <div style={{ fontSize: '12px', color: '#4a5a7a' }}>or click to browse</div>
-                <div style={{ marginTop: '8px', padding: '6px 14px', background: '#0d1a3a', border: '1px solid #4a8fff', borderRadius: '6px', fontSize: '12px', color: '#4a8fff', fontFamily: 'monospace' }}>
-                  Choose File
-                </div>
-              </div>
+              {importType === 'text' && (
+                <TextToFlowTab
+                  onGenerated={handleImageParsed}
+                  onError={msg => setError(msg)}
+                />
+              )}
 
-              <div style={{ marginTop: '20px', padding: '12px 16px', background: '#0a0e1a', border: '1px solid #1a2a3a', borderRadius: '8px', maxWidth: '360px', width: '100%' }}>
-                <div style={{ fontSize: '11px', color: '#4a5a7a', fontFamily: 'monospace', marginBottom: '6px' }}>HOW TO EXPORT FROM VISIO</div>
-                <div style={{ fontSize: '12px', color: '#6a7a9a', lineHeight: 1.6 }}>
-                  File → Save As → <strong style={{ color: '#8a9aba' }}>Visio Drawing (.vsdx)</strong>
+              {importType === 'visio' && (
+                <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+                  <input ref={fileRef} type="file" accept=".vsdx,.vsd" style={{ display: 'none' }}
+                    onChange={e => handleVisioFile(e.target.files[0])} />
+
+                  <div
+                    onClick={() => fileRef.current.click()}
+                    onDragOver={e => { e.preventDefault(); e.currentTarget.style.borderColor = '#4a8fff' }}
+                    onDragLeave={e => { e.currentTarget.style.borderColor = '#2a3a5a' }}
+                    onDrop={e => { e.preventDefault(); e.currentTarget.style.borderColor = '#2a3a5a'; handleVisioFile(e.dataTransfer.files[0]) }}
+                    style={{
+                      width: '100%', maxWidth: '420px', padding: '52px 32px',
+                      border: '2px dashed #2a3a5a', borderRadius: '12px',
+                      display: 'flex', flexDirection: 'column', alignItems: 'center', gap: '12px',
+                      cursor: 'pointer', transition: 'border-color 0.2s, background 0.2s',
+                      background: '#0a0e1a',
+                    }}
+                    onMouseEnter={e => { e.currentTarget.style.borderColor = '#4a8fff'; e.currentTarget.style.background = '#0d1220' }}
+                    onMouseLeave={e => { e.currentTarget.style.borderColor = '#2a3a5a'; e.currentTarget.style.background = '#0a0e1a' }}>
+                    <div style={{ fontSize: '36px', opacity: 0.5 }}>⬡</div>
+                    <div style={{ fontSize: '14px', color: '#8a9aba', fontWeight: 500 }}>Drop your .vsdx file here</div>
+                    <div style={{ fontSize: '12px', color: '#4a5a7a' }}>or click to browse</div>
+                    <div style={{ marginTop: '8px', padding: '6px 14px', background: '#0d1a3a', border: '1px solid #4a8fff', borderRadius: '6px', fontSize: '12px', color: '#4a8fff', fontFamily: 'monospace' }}>
+                      Choose File
+                    </div>
+                  </div>
+
+                  <div style={{ marginTop: '20px', padding: '12px 16px', background: '#0a0e1a', border: '1px solid #1a2a3a', borderRadius: '8px', maxWidth: '420px', width: '100%' }}>
+                    <div style={{ fontSize: '11px', color: '#4a5a7a', fontFamily: 'monospace', marginBottom: '6px' }}>HOW TO EXPORT FROM VISIO</div>
+                    <div style={{ fontSize: '12px', color: '#6a7a9a', lineHeight: 1.6 }}>
+                      File → Save As → <strong style={{ color: '#8a9aba' }}>Visio Drawing (.vsdx)</strong>
+                    </div>
+                  </div>
                 </div>
-              </div>
+              )}
 
               {error && (
-                <div style={{ marginTop: '16px', padding: '10px 14px', background: '#1a0a0a', border: '1px solid #5a2a2a', borderRadius: '6px', color: '#ef4444', fontSize: '12px', maxWidth: '360px', width: '100%' }}>
+                <div style={{ marginTop: '16px', padding: '10px 14px', background: '#1a0a0a', border: '1px solid #5a2a2a', borderRadius: '6px', color: '#ef4444', fontSize: '12px' }}>
                   {error}
                 </div>
               )}
@@ -727,7 +1018,6 @@ export default function VisioImportModal({ onClose, onImported }) {
           {step === 1 && (
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column', gap: '16px', minHeight: 0 }}>
 
-              {/* Warnings */}
               {parseWarnings.length > 0 && (
                 <div style={{ padding: '10px 14px', background: '#1a1500', border: '1px solid #3a3000', borderRadius: '6px' }}>
                   {parseWarnings.map((w, i) => (
@@ -736,35 +1026,47 @@ export default function VisioImportModal({ onClose, onImported }) {
                 </div>
               )}
 
-              {/* Flow name + description */}
               <div style={{ display: 'flex', gap: '12px' }}>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: '10px', color: '#4a5a7a', fontFamily: 'monospace', marginBottom: '5px' }}>FLOW NAME *</div>
                   <input value={flowName} onChange={e => setFlowName(e.target.value)}
-                    style={{ width: '100%', padding: '8px 10px', background: '#0d1120', border: '1px solid #2a3a5a', borderRadius: '6px', color: '#c8d0e0', fontSize: '13px', outline: 'none', fontFamily: 'inherit' }} />
+                    style={{ width: '100%', padding: '8px 10px', background: '#0d1120', border: '1px solid #2a3a5a', borderRadius: '6px', color: '#c8d0e0', fontSize: '13px', outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box' }} />
                 </div>
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: '10px', color: '#4a5a7a', fontFamily: 'monospace', marginBottom: '5px' }}>DESCRIPTION</div>
                   <input value={flowDesc} onChange={e => setFlowDesc(e.target.value)} placeholder="Optional…"
-                    style={{ width: '100%', padding: '8px 10px', background: '#0d1120', border: '1px solid #2a3a5a', borderRadius: '6px', color: '#c8d0e0', fontSize: '13px', outline: 'none', fontFamily: 'inherit' }} />
+                    style={{ width: '100%', padding: '8px 10px', background: '#0d1120', border: '1px solid #2a3a5a', borderRadius: '6px', color: '#c8d0e0', fontSize: '13px', outline: 'none', fontFamily: 'inherit', boxSizing: 'border-box' }} />
                 </div>
               </div>
 
-              {/* Stats bar */}
-              <div style={{ display: 'flex', gap: '16px', padding: '10px 14px', background: '#0a0e1a', borderRadius: '8px', border: '1px solid #1a2a4a' }}>
-                {[
-                  { label: 'NODES', value: nodes.length },
-                  { label: 'EDGES', value: edges.length },
-                  { label: 'QUESTIONS', value: nodes.filter(n => n.type === 'question').length },
-                  { label: 'RESULTS', value: nodes.filter(n => n.type === 'result').length },
-                  { label: 'START SET', value: nodes.some(n => n.is_start) ? '✓' : '✗' },
-                ].map(s => (
-                  <div key={s.label} style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                    <div style={{ fontSize: '9px', color: '#4a5a7a', fontFamily: 'monospace' }}>{s.label}</div>
-                    <div style={{ fontSize: '16px', fontWeight: 600, color: s.value === '✗' ? '#ef4444' : s.value === '✓' ? '#22c55e' : '#c8d0e0', fontFamily: 'monospace' }}>{s.value}</div>
-                  </div>
-                ))}
-                <div style={{ marginLeft: 'auto', fontSize: '11px', color: '#4a5a7a', alignSelf: 'center', fontFamily: 'monospace' }}>
+              {/* Source badge */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <div style={{
+                  padding: '3px 10px', borderRadius: '4px', fontSize: '11px', fontFamily: 'monospace',
+                  background: importType === 'text' ? '#0d0a1a' : '#0a1a0a',
+                  border: `1px solid ${importType === 'text' ? '#4a2aff' : '#1a3a1a'}`,
+                  color: importType === 'text' ? '#8a6aff' : '#4a9a4a',
+                }}>
+                  {importType === 'text' ? '✦ AI-generated from text' : '⬡ Parsed from Visio'}
+                </div>
+
+                {/* Stats */}
+                <div style={{ display: 'flex', gap: '16px', marginLeft: '8px' }}>
+                  {[
+                    { label: 'NODES', value: nodes.length },
+                    { label: 'EDGES', value: edges.length },
+                    { label: 'QUESTIONS', value: nodes.filter(n => n.type === 'question').length },
+                    { label: 'RESULTS', value: nodes.filter(n => n.type === 'result').length },
+                    { label: 'START', value: nodes.some(n => n.is_start) ? '✓' : '✗' },
+                  ].map(s => (
+                    <div key={s.label} style={{ display: 'flex', flexDirection: 'column', gap: '1px' }}>
+                      <div style={{ fontSize: '9px', color: '#4a5a7a', fontFamily: 'monospace' }}>{s.label}</div>
+                      <div style={{ fontSize: '15px', fontWeight: 600, color: s.value === '✗' ? '#ef4444' : s.value === '✓' ? '#22c55e' : '#c8d0e0', fontFamily: 'monospace' }}>{s.value}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{ marginLeft: 'auto', fontSize: '11px', color: '#4a5a7a', fontFamily: 'monospace' }}>
                   click any node to edit →
                 </div>
               </div>
@@ -789,9 +1091,8 @@ export default function VisioImportModal({ onClose, onImported }) {
                 </div>
               )}
 
-              {/* Action buttons */}
               <div style={{ display: 'flex', gap: '10px', justifyContent: 'flex-end' }}>
-                <button onClick={() => { setStep(0); setNodes([]); setEdges([]) }}
+                <button onClick={() => { setStep(0); setNodes([]); setEdges([]); setError('') }}
                   style={{ padding: '9px 18px', border: '1px solid #2a3a5a', borderRadius: '6px', color: '#8a9aba', fontSize: '13px', background: 'transparent', cursor: 'pointer' }}>
                   ← Re-upload
                 </button>
