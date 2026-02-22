@@ -630,15 +630,20 @@ def create_edge(version_id):
         return err
     if data["source"] == data["target"]:
         return jsonify({"error": "Source and target nodes cannot be the same"}), 400
+    condition_label = data.get("condition_label", "").strip()
+    # Only block truly identical edges (same source, target AND same label)
+    # Different labels on the same source→target pair are valid (e.g. "yes" / "no")
     existing = Edge.query.filter_by(
-        flow_version_id=version_id, source_node_id=data["source"],
-        target_node_id=data["target"], condition_label=data.get("condition_label", ""),
+        flow_version_id=version_id,
+        source_node_id=data["source"],
+        target_node_id=data["target"],
+        condition_label=condition_label,
     ).first()
     if existing:
         return jsonify({"error": "An identical connection already exists"}), 409
     edge = Edge(
         flow_version_id=version_id, source_node_id=data["source"], target_node_id=data["target"],
-        condition_label=data.get("condition_label", "").strip(), sort_order=data.get("sort_order", 0),
+        condition_label=condition_label, sort_order=data.get("sort_order", 0),
     )
     db.session.add(edge)
     db.session.commit()
@@ -664,6 +669,107 @@ def delete_edge(version_id, edge_id):
     db.session.commit()
     return jsonify({"deleted": True})
 
+
+
+# ─── BATCH IMPORT ─────────────────────────────────────────
+@app.post("/api/v1/versions/<version_id>/import")
+def batch_import(version_id):
+    """
+    Atomically import all nodes and edges in a single transaction.
+    If anything fails, the whole thing rolls back — no partial saves.
+    Expects: { nodes: [...], edges: [...] }
+    Returns: { nodes: [...], edges: [...] } with real server IDs.
+    """
+    FlowVersion.query.get_or_404(version_id)
+    data = request.get_json(silent=True) or {}
+    incoming_nodes = data.get("nodes", [])
+    incoming_edges = data.get("edges", [])
+
+    if not incoming_nodes:
+        return jsonify({"error": "No nodes provided"}), 400
+
+    try:
+        # Clean slate for this version
+        Edge.query.filter_by(flow_version_id=version_id).delete()
+        Node.query.filter_by(flow_version_id=version_id).delete()
+
+        # Create nodes, map tempId -> real db id
+        id_map = {}
+        created_nodes = []
+        for n in incoming_nodes:
+            title = (n.get("title") or "").strip() or "Untitled step"
+            node_type = n.get("type", "question")
+            if node_type not in VALID_NODE_TYPES:
+                node_type = "question"
+            node = Node(
+                flow_version_id=version_id,
+                type=node_type,
+                title=title,
+                body=(n.get("body") or "").strip() or None,
+                position_x=float(n.get("position", {}).get("x") or 0),
+                position_y=float(n.get("position", {}).get("y") or 0),
+                node_metadata=n.get("metadata") or {},
+                is_start=bool(n.get("is_start", False)),
+            )
+            db.session.add(node)
+            db.session.flush()  # assigns node.id without committing
+            temp_id = str(n.get("tempId") or n.get("id") or len(id_map))
+            id_map[temp_id] = node.id
+            created_nodes.append(node)
+
+        # Ensure exactly one start node
+        start_nodes = [n for n in created_nodes if n.is_start]
+        if not start_nodes and created_nodes:
+            created_nodes[0].is_start = True
+        elif len(start_nodes) > 1:
+            for n in start_nodes[1:]:
+                n.is_start = False
+
+        # Create edges
+        created_edges = []
+        skipped = []
+        seen = set()
+        for e in incoming_edges:
+            src_temp = str(e.get("sourceId") or e.get("source") or "")
+            tgt_temp = str(e.get("targetId") or e.get("target") or "")
+            src_id = id_map.get(src_temp)
+            tgt_id = id_map.get(tgt_temp)
+            label = (e.get("label") or e.get("condition_label") or "").strip()
+
+            if not src_id or not tgt_id:
+                skipped.append(f"Unknown node ref: {src_temp} -> {tgt_temp}")
+                continue
+            if src_id == tgt_id:
+                continue
+            key = (src_id, tgt_id, label)
+            if key in seen:
+                continue
+            seen.add(key)
+
+            edge = Edge(
+                flow_version_id=version_id,
+                source_node_id=src_id,
+                target_node_id=tgt_id,
+                condition_label=label,
+                sort_order=int(e.get("sort_order") or 0),
+            )
+            db.session.add(edge)
+            created_edges.append(edge)
+
+        db.session.commit()
+        audit("version.batch_import", "flow_version", version_id, {
+            "node_count": len(created_nodes),
+            "edge_count": len(created_edges),
+        })
+        return jsonify({
+            "nodes": [n.to_dict() for n in created_nodes],
+            "edges": [e.to_dict() for e in created_edges],
+            "skipped_edges": skipped,
+        })
+
+    except Exception as exc:
+        db.session.rollback()
+        return jsonify({"error": f"Import failed: {str(exc)}"}), 500
 
 # ─── SESSIONS ─────────────────────────────────────────────
 
@@ -1207,113 +1313,75 @@ def generate_flow_from_text():
     try:
         client = _genai.Client(api_key=api_key)
 
-        # Schema constrains Gemini to output exactly our required structure
-        # This is the most reliable way to get valid JSON — enforced at token level
-        FLOW_SCHEMA = _genai_types.Schema(
-            type=_genai_types.Type.OBJECT,
-            required=["nodes", "edges"],
-            properties={
-                "nodes": _genai_types.Schema(
-                    type=_genai_types.Type.ARRAY,
-                    items=_genai_types.Schema(
-                        type=_genai_types.Type.OBJECT,
-                        required=["id", "title", "type", "is_start"],
-                        properties={
-                            "id": _genai_types.Schema(type=_genai_types.Type.STRING),
-                            "title": _genai_types.Schema(type=_genai_types.Type.STRING),
-                            "type": _genai_types.Schema(
-                                type=_genai_types.Type.STRING,
-                                enum=["question", "result"],
-                            ),
-                            "body": _genai_types.Schema(type=_genai_types.Type.STRING),
-                            "resolution": _genai_types.Schema(type=_genai_types.Type.STRING),
-                            "is_start": _genai_types.Schema(type=_genai_types.Type.BOOLEAN),
-                            "position": _genai_types.Schema(
-                                type=_genai_types.Type.OBJECT,
-                                properties={
-                                    "x": _genai_types.Schema(type=_genai_types.Type.NUMBER),
-                                    "y": _genai_types.Schema(type=_genai_types.Type.NUMBER),
-                                },
-                            ),
-                        },
-                    ),
-                ),
-                "edges": _genai_types.Schema(
-                    type=_genai_types.Type.ARRAY,
-                    items=_genai_types.Schema(
-                        type=_genai_types.Type.OBJECT,
-                        required=["source", "target"],
-                        properties={
-                            "source": _genai_types.Schema(type=_genai_types.Type.STRING),
-                            "target": _genai_types.Schema(type=_genai_types.Type.STRING),
-                            "label": _genai_types.Schema(type=_genai_types.Type.STRING),
-                        },
-                    ),
-                ),
-                "suggestions": _genai_types.Schema(
-                    type=_genai_types.Type.ARRAY,
-                    items=_genai_types.Schema(type=_genai_types.Type.STRING),
-                ),
-            },
-        )
-
-        def _call_gemini(temperature):
+        def _call_gemini(contents, temperature=0.2, max_tokens=16384):
             return client.models.generate_content(
                 model="gemini-2.5-flash",
-                contents=f"Convert this flow description into a structured JSON flow:\n\n{description}",
+                contents=contents,
                 config=_genai_types.GenerateContentConfig(
                     system_instruction=TEXT_TO_FLOW_PROMPT,
                     temperature=temperature,
-                    max_output_tokens=8192,
+                    max_output_tokens=max_tokens,
                     response_mime_type="application/json",
-                    response_schema=FLOW_SCHEMA,
+                    # NOTE: No response_schema — it causes Gemini to silently
+                    # truncate large flows to fit the token budget while keeping
+                    # JSON valid, producing partial outputs (e.g. 4 nodes instead
+                    # of 12). We rely on the prompt + _parse_ai_json instead.
                 ),
             )
 
-        def _check_truncated(response):
-            """Return True if the response was cut off before finishing."""
+        def _is_truncated(response):
             try:
-                candidate = response.candidates[0]
-                reason = str(candidate.finish_reason)
-                # finish_reason MAX_TOKENS means output was cut off
+                reason = str(response.candidates[0].finish_reason)
                 return "MAX_TOKENS" in reason or reason == "2"
             except Exception:
                 return False
 
-        # First attempt
-        response = _call_gemini(temperature=0.2)
-        raw_text = response.text.strip() if response.text else ""
+        def _node_count_seems_low(parsed, description):
+            """Heuristic: if description is long but we got very few nodes, likely truncated."""
+            node_count = len(parsed.get("nodes") or [])
+            desc_words = len(description.split())
+            # A description with 100+ words should produce at least 5 nodes
+            return desc_words > 60 and node_count < 5
 
-        if _check_truncated(response):
-            app.logger.warning("Gemini response truncated (MAX_TOKENS). Asking for a shorter flow.")
-            # Ask for a more concise flow that fits within the token budget
-            response = client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=(
-                    f"Convert this flow description into a CONCISE JSON flow (max 10 nodes).\n\n{description}"
-                ),
-                config=_genai_types.GenerateContentConfig(
-                    system_instruction=TEXT_TO_FLOW_PROMPT,
-                    temperature=0,
-                    max_output_tokens=8192,
-                    response_mime_type="application/json",
-                    response_schema=FLOW_SCHEMA,
-                ),
-            )
-            raw_text = response.text.strip() if response.text else ""
+        prompt_full = f"Convert this flow description into a structured JSON flow:\n\n{description}"
+        prompt_concise = (
+            f"Convert this flow description into a CONCISE JSON flow with at most 12 nodes.\n"
+            f"Include ALL decision branches and result outcomes even if simplified.\n\n{description}"
+        )
+
+        # Attempt 1: full prompt, generous token budget
+        response = _call_gemini(prompt_full, temperature=0.2)
+        raw_text = (response.text or "").strip()
+        truncated = _is_truncated(response)
+
+        app.logger.info("Gemini attempt 1: finish_reason=%s, raw_len=%d",
+            response.candidates[0].finish_reason if response.candidates else "?", len(raw_text))
 
         parsed = _parse_ai_json(raw_text)
-        if parsed is None:
-            app.logger.warning("First Gemini call returned unparseable JSON, retrying. Raw: %s", raw_text[:200])
-            response2 = _call_gemini(temperature=0)
-            raw_text = response2.text.strip() if response2.text else ""
-            parsed = _parse_ai_json(raw_text)
+
+        # Attempt 2: if truncated OR too few nodes, retry with concise prompt at temp=0
+        if truncated or parsed is None or _node_count_seems_low(parsed, description):
+            app.logger.warning(
+                "Attempt 1 insufficient (truncated=%s, nodes=%d). Retrying with concise prompt.",
+                truncated, len((parsed or {}).get("nodes") or [])
+            )
+            response2 = _call_gemini(prompt_concise, temperature=0)
+            raw_text2 = (response2.text or "").strip()
+            parsed2 = _parse_ai_json(raw_text2)
+
+            app.logger.info("Gemini attempt 2: finish_reason=%s, nodes=%d",
+                response2.candidates[0].finish_reason if response2.candidates else "?",
+                len((parsed2 or {}).get("nodes") or []))
+
+            # Keep whichever result has more nodes
+            if parsed2 and len((parsed2.get("nodes") or [])) > len((parsed or {}).get("nodes") or []):
+                parsed = parsed2
+                raw_text = raw_text2
 
         if parsed is None:
-            app.logger.error("Both Gemini calls failed to return valid JSON. Raw: %s", raw_text[:500])
+            app.logger.error("Both Gemini calls failed. Raw: %s", raw_text[:400])
             return jsonify({
-                "error": "AI returned malformed JSON. Please try again — if this keeps happening, try shortening your description.",
-                "raw": raw_text[:300],
+                "error": "AI returned malformed JSON. Please try again or rephrase your description.",
             }), 500
 
         nodes = parsed.get("nodes", [])

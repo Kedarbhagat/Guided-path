@@ -343,10 +343,17 @@ function Dashboard() {
       {showVisioImport && (
         <VisioImportModal
           onClose={() => setShowVisioImport(false)}
-          onImported={({ flowId, versionId, flowName }) => {
+          onImported={({ flowId, versionId, flowName, published }) => {
             setShowVisioImport(false)
-            toast(`Flow "${flowName}" imported successfully!`, 'success')
-            load()
+            if (published) {
+              // Published: stay on dashboard and refresh
+              toast(`Flow "${flowName}" imported and published!`, 'success')
+              load()
+            } else {
+              // Draft: go straight to the builder so they can edit immediately
+              toast(`Flow "${flowName}" saved — opening editor…`, 'success')
+              navigate(`/build/${flowId}/${versionId}`)
+            }
           }}
         />
       )}

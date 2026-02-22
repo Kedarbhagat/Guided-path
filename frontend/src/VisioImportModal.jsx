@@ -851,59 +851,39 @@ export default function VisioImportModal({ onClose, onImported }) {
     setError('')
 
     try {
-      // POST /flows already returns flow.to_dict() which includes versions[]
-      // No need for a second GET — avoids a race condition on slow connections
+      // Step 1: Create the flow — response already includes versions[]
       const flow = await req('POST', '/flows', { name: flowName.trim(), description: flowDesc.trim() })
-
-      // Find the draft version: versions are ordered newest-first
       const draftVersion = (flow.versions || []).find(v => v.status === 'draft')
       const versionId = draftVersion?.id || (flow.versions || [])[0]?.id
       if (!versionId) throw new Error('Server did not return a version ID — please try again')
 
-      // Create all nodes and build a tempId → real server ID map
-      const idMap = {}
-      for (const node of nodes) {
-        const created = await req('POST', `/versions/${versionId}/nodes`, {
-          type: node.type,
-          title: node.title,
-          body: node.body || '',
-          position: node.position,
-          is_start: node.is_start,
-          metadata: node.type === 'result'
-            ? { resolution: node.resolution || '', escalate_to: null }
+      // Step 2: Send ALL nodes and edges in a single atomic request.
+      // If anything fails the backend rolls back the entire transaction,
+      // so we never get partial saves with missing nodes or edges.
+      const result = await req('POST', `/versions/${versionId}/import`, {
+        nodes: nodes.map(n => ({
+          tempId: n.tempId,
+          type: n.type,
+          title: n.title || 'Untitled step',
+          body: n.body || '',
+          position: n.position,
+          is_start: n.is_start,
+          metadata: n.type === 'result'
+            ? { resolution: n.resolution || '', escalate_to: null }
             : {},
-        })
-        idMap[node.tempId] = created.id
+        })),
+        edges: edges.map(e => ({
+          sourceId: e.sourceId,
+          targetId: e.targetId,
+          label: e.label || '',
+        })),
+      })
+
+      if (result.skipped_edges?.length > 0) {
+        console.warn('Skipped edges:', result.skipped_edges)
       }
 
-      // Create edges — collect failures instead of silently dropping them
-      const edgeErrors = []
-      for (const edge of edges) {
-        const srcId = idMap[edge.sourceId]
-        const tgtId = idMap[edge.targetId]
-        if (!srcId || !tgtId) {
-          edgeErrors.push(`Could not map edge ${edge.sourceId} → ${edge.targetId}`)
-          continue
-        }
-        try {
-          await req('POST', `/versions/${versionId}/edges`, {
-            source: srcId,
-            target: tgtId,
-            condition_label: edge.label || '',
-          })
-        } catch (edgeErr) {
-          // 409 = duplicate edge (shouldn't happen on fresh import, but handle gracefully)
-          if (!edgeErr.message.includes('409') && !edgeErr.message.toLowerCase().includes('already exists')) {
-            edgeErrors.push(`Edge "${edge.label || '(unlabelled)'}": ${edgeErr.message}`)
-          }
-        }
-      }
-
-      if (edgeErrors.length > 0) {
-        console.warn('Some edges could not be saved:', edgeErrors)
-        setParseWarnings(prev => [...prev, ...edgeErrors.map(e => `⚠ ${e}`)])
-      }
-
+      // Step 3: Optionally publish
       if (publishAfterSave) {
         await req('POST', `/flows/${flow.id}/versions/${versionId}/publish`, {
           change_notes: `Imported from ${importType === 'text' ? 'text description (AI)' : 'Visio'}`
