@@ -2,6 +2,58 @@ import { useState, useEffect, useRef, useCallback, memo } from 'react'
 import { Routes, Route, Link, useNavigate, useParams, useLocation } from 'react-router-dom'
 import VisioImportModal from './VisioImportModal'
 
+
+// ─── GLOBAL LIGHT THEME ───────────────────────────────────────
+function GlobalStyle() {
+  return (
+    <style>{`
+      @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap');
+
+      *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+      :root {
+        --bg:       #f4f6f9;
+        --surface:  #ffffff;
+        --surface2: #f1f5f9;
+        --border:   #e2e8f0;
+        --border2:  #cbd5e1;
+        --text:     #0f172a;
+        --text2:    #475569;
+        --text3:    #94a3b8;
+        --accent:   #2563eb;
+        --accent2:  #3b82f6;
+        --green:    #16a34a;
+        --red:      #dc2626;
+        --yellow:   #b45309;
+        --mono:     'DM Mono', 'JetBrains Mono', ui-monospace, monospace;
+      }
+
+      html, body, #root { height: 100%; }
+      body {
+        font-family: 'DM Sans', system-ui, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+        -webkit-font-smoothing: antialiased;
+      }
+      button { background: none; border: none; cursor: pointer; font-family: inherit; }
+      input, textarea, select { font-family: inherit; background: var(--surface); color: var(--text); }
+      a { text-decoration: none; color: inherit; }
+
+      @keyframes fadeIn  { from { opacity: 0 } to { opacity: 1 } }
+      @keyframes fadeUp  { from { opacity: 0; transform: translateY(8px) } to { opacity: 1; transform: translateY(0) } }
+      @keyframes pulse   { 0%,100% { opacity: 0.5 } 50% { opacity: 1 } }
+      @keyframes spin    { from { transform: rotate(0deg) } to { transform: rotate(360deg) } }
+      .fade-up { animation: fadeUp 0.25s ease both; }
+
+      ::-webkit-scrollbar { width: 5px; height: 5px; }
+      ::-webkit-scrollbar-track { background: transparent; }
+      ::-webkit-scrollbar-thumb { background: var(--border2); border-radius: 3px; }
+
+      select option { background: #fff; color: var(--text); }
+    `}</style>
+  )
+}
+
 // ─── API ──────────────────────────────────────────────────────
 const BASE = 'http://localhost:5000/api/v1'
 
@@ -27,6 +79,7 @@ const api = {
   getFlow: (id) => req('GET', `/flows/${id}`),
   updateFlow: (id, d) => req('PUT', `/flows/${id}`, d),
   deleteFlow: (id) => req('DELETE', `/flows/${id}`),
+  permanentDeleteFlow: (id) => req('DELETE', `/flows/${id}/permanent`),
   duplicateFlow: (id, d) => req('POST', `/flows/${id}/duplicate`, d),
   restoreFlow: (id) => req('POST', `/flows/${id}/restore`),
   getArchivedFlows: () => req('GET', '/flows/archived'),
@@ -67,10 +120,10 @@ function ToastContainer({ toasts }) {
       {toasts.map(t => (
         <div key={t.id} style={{
           padding: '12px 18px', borderRadius: '8px', fontSize: '13px', fontFamily: 'var(--mono)',
-          background: t.type === 'error' ? '#2a1010' : t.type === 'warn' ? '#2a2010' : '#0d2a1a',
-          border: `1px solid ${t.type === 'error' ? 'var(--red)' : t.type === 'warn' ? 'var(--yellow)' : 'var(--green)'}`,
-          color: t.type === 'error' ? 'var(--red)' : t.type === 'warn' ? 'var(--yellow)' : 'var(--green)',
-          animation: 'fadeUp 0.2s ease', boxShadow: '0 4px 20px rgba(0,0,0,0.4)',
+          background: t.type === 'error' ? '#fef2f2' : t.type === 'warn' ? '#fffbeb' : '#f0fdf4',
+          border: `1px solid ${t.type === 'error' ? '#fca5a5' : t.type === 'warn' ? '#fde68a' : '#86efac'}`,
+          color: t.type === 'error' ? '#dc2626' : t.type === 'warn' ? '#b45309' : '#16a34a',
+          animation: 'fadeUp 0.2s ease', boxShadow: '0 4px 20px rgba(15,23,42,0.1)',
           display: 'flex', alignItems: 'center', gap: '8px',
         }}>
           <span>{t.type === 'error' ? '✕' : t.type === 'warn' ? '⚠' : '✓'}</span>
@@ -89,9 +142,9 @@ function Modal({ title, children, onClose, width = '420px' }) {
     return () => window.removeEventListener('keydown', h)
   }, [onClose])
   return (
-    <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(0,0,0,0.65)', backdropFilter: 'blur(4px)', animation: 'fadeIn 0.15s ease' }}
+    <div style={{ position: 'fixed', inset: 0, zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', background: 'rgba(15,23,42,0.45)', backdropFilter: 'blur(4px)', animation: 'fadeIn 0.15s ease' }}
       onClick={onClose}>
-      <div style={{ background: 'var(--surface)', border: '1px solid var(--border2)', borderRadius: '12px', padding: '28px', width, maxWidth: 'calc(100vw - 48px)', boxShadow: '0 20px 60px rgba(0,0,0,0.5)', animation: 'fadeUp 0.2s ease', maxHeight: '90vh', overflowY: 'auto' }}
+      <div style={{ background: 'var(--surface)', border: '1px solid var(--border2)', borderRadius: '12px', padding: '28px', width, maxWidth: 'calc(100vw - 48px)', boxShadow: '0 20px 60px rgba(15,23,42,0.08)', animation: 'fadeUp 0.2s ease', maxHeight: '90vh', overflowY: 'auto' }}
         onClick={e => e.stopPropagation()}>
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '20px' }}>
           <div style={{ fontFamily: 'var(--mono)', fontSize: '11px', color: 'var(--text3)', letterSpacing: '0.08em' }}>{title}</div>
@@ -129,10 +182,12 @@ function Nav() {
   return (
     <nav style={{ display: 'flex', alignItems: 'center', padding: '0 24px', height: '52px', borderBottom: '1px solid var(--border)', background: 'var(--surface)', flexShrink: 0 }}>
       <Link to="/" style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-        <div style={{ width: '28px', height: '28px', borderRadius: '6px', background: 'var(--accent)', display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-          <span style={{ fontFamily: 'var(--mono)', fontSize: '11px', fontWeight: 700, color: '#fff' }}>GR</span>
+        <div style={{ width: '28px', height: '28px', borderRadius: '6px', background: '#1a56db', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'hidden' }}>
+          <svg viewBox="0 0 40 40" width="22" height="22" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <text x="50%" y="54%" dominantBaseline="middle" textAnchor="middle" fontFamily="'DM Sans', system-ui, sans-serif" fontWeight="700" fontSize="17" fill="#ffffff" letterSpacing="-0.5">P 44</text>
+          </svg>
         </div>
-        <span style={{ color: 'var(--text2)', fontSize: '13px', fontWeight: 400 }}>Guided Resolution</span>
+        <span style={{ color: 'var(--text2)', fontSize: '13px', fontWeight: 400 }}>Project44 : Guided Path</span>
       </Link>
       <div style={{ flex: 1 }} />
       <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
@@ -330,7 +385,7 @@ function Dashboard() {
       style={{
         padding: '5px 12px', borderRadius: '5px', fontSize: '12px',
         border: `1px solid ${current === value ? 'var(--accent)' : 'var(--border)'}`,
-        background: current === value ? '#0d1a3a' : 'var(--surface2)',
+        background: current === value ? '#eff6ff' : 'var(--surface2)',
         color: current === value ? 'var(--accent2)' : 'var(--text3)',
         transition: 'all 0.15s',
       }}>{label}</button>
@@ -345,15 +400,11 @@ function Dashboard() {
           onClose={() => setShowVisioImport(false)}
           onImported={({ flowId, versionId, flowName, published }) => {
             setShowVisioImport(false)
-            if (published) {
-              // Published: stay on dashboard and refresh
-              toast(`Flow "${flowName}" imported and published!`, 'success')
-              load()
-            } else {
-              // Draft: go straight to the builder so they can edit immediately
-              toast(`Flow "${flowName}" saved — opening editor…`, 'success')
-              navigate(`/build/${flowId}/${versionId}`)
-            }
+            const msg = published
+              ? `Flow "${flowName}" imported & published — opening builder…`
+              : `Flow "${flowName}" saved — opening editor…`
+            toast(msg, 'success')
+            navigate(`/build/${flowId}/${versionId}`)
           }}
         />
       )}
@@ -554,6 +605,7 @@ function FlowCard({ flow, index, onDelete, onDuplicate, toast }) {
   const [hovered, setHovered] = useState(false)
   const [showMenu, setShowMenu] = useState(false)
   const [confirmDelete, setConfirmDelete] = useState(false)
+  const [confirmPermanentDelete, setConfirmPermanentDelete] = useState(false)
   const stats = flow.stats
 
   async function handleDuplicate() {
@@ -576,6 +628,15 @@ function FlowCard({ flow, index, onDelete, onDuplicate, toast }) {
     } catch (e) { toast(e.message, 'error') }
   }
 
+  async function handlePermanentDelete() {
+    setConfirmPermanentDelete(false)
+    try {
+      await api.permanentDeleteFlow(flow.id)
+      onDelete()
+      toast('Flow permanently deleted')
+    } catch (e) { toast(e.message, 'error') }
+  }
+
   return (
     <>
       {confirmDelete && (
@@ -588,6 +649,16 @@ function FlowCard({ flow, index, onDelete, onDuplicate, toast }) {
           onClose={() => setConfirmDelete(false)}
         />
       )}
+      {confirmPermanentDelete && (
+        <ConfirmDialog
+          title="PERMANENTLY DELETE"
+          message={`Permanently delete "${flow.name}"? This cannot be undone — all versions, nodes, and data will be lost forever.`}
+          confirmLabel="Delete Forever"
+          confirmColor="#dc2626"
+          onConfirm={handlePermanentDelete}
+          onClose={() => setConfirmPermanentDelete(false)}
+        />
+      )}
 
       <div className="fade-up"
         style={{ animationDelay: `${index * 0.04}s`, animationFillMode: 'both', opacity: 0, padding: '22px', background: hovered ? 'var(--surface2)' : 'var(--surface)', border: `1px solid ${hovered ? 'var(--border2)' : 'var(--border)'}`, borderRadius: '10px', transition: 'border-color 0.15s, background 0.15s', display: 'flex', flexDirection: 'column', position: 'relative' }}
@@ -596,7 +667,7 @@ function FlowCard({ flow, index, onDelete, onDuplicate, toast }) {
 
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontFamily: 'var(--mono)', fontSize: '10px', letterSpacing: '0.06em', padding: '3px 8px', borderRadius: '4px', background: hasPublished ? '#0d2a1a' : '#1a1808', color: hasPublished ? 'var(--green)' : 'var(--yellow)', border: `1px solid ${hasPublished ? '#1a4a2a' : '#3a3510'}` }}>
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', fontFamily: 'var(--mono)', fontSize: '10px', letterSpacing: '0.06em', padding: '3px 8px', borderRadius: '4px', background: hasPublished ? '#f0fdf4' : '#fefce8', color: hasPublished ? 'var(--green)' : 'var(--yellow)', border: `1px solid ${hasPublished ? '#86efac' : '#fde68a'}` }}>
               <span style={{ width: '5px', height: '5px', borderRadius: '50%', background: 'currentColor' }} />
               {hasPublished ? 'LIVE' : 'DRAFT'}
             </span>
@@ -614,12 +685,13 @@ function FlowCard({ flow, index, onDelete, onDuplicate, toast }) {
               onMouseEnter={e => { e.currentTarget.style.color = 'var(--text)'; e.currentTarget.style.background = 'var(--surface2)' }}
               onMouseLeave={e => { e.currentTarget.style.color = 'var(--text3)'; e.currentTarget.style.background = 'transparent' }}>⋯</button>
             {showMenu && (
-              <div style={{ position: 'absolute', right: 0, top: '30px', background: 'var(--surface)', border: '1px solid var(--border2)', borderRadius: '8px', padding: '6px', zIndex: 100, width: '160px', boxShadow: '0 8px 24px rgba(0,0,0,0.4)' }}>
+              <div style={{ position: 'absolute', right: 0, top: '30px', background: 'var(--surface)', border: '1px solid var(--border2)', borderRadius: '8px', padding: '6px', zIndex: 100, width: '160px', boxShadow: '0 8px 24px rgba(15,23,42,0.1)' }}>
                 <MenuItemBtn label="⊕ Duplicate" onClick={handleDuplicate} />
                 {draftVersion && <MenuItemBtn label="✎ Edit draft" onClick={() => { setShowMenu(false); navigate(`/build/${flow.id}/${draftVersion.id}`) }} />}
                 {hasPublished && <MenuItemBtn label="▶ Run" onClick={() => { setShowMenu(false); navigate(`/execute/${flow.id}`) }} />}
                 <div style={{ height: '1px', background: 'var(--border)', margin: '4px 0' }} />
                 <MenuItemBtn label="⊘ Archive" onClick={() => { setShowMenu(false); setConfirmDelete(true) }} color="var(--red)" />
+                <MenuItemBtn label="✕ Delete forever" onClick={() => { setShowMenu(false); setConfirmPermanentDelete(true) }} color="#ef4444" />
               </div>
             )}
           </div>
@@ -658,9 +730,9 @@ function FlowCard({ flow, index, onDelete, onDuplicate, toast }) {
           {/* Draft-only flow: prominent accent Edit Draft button */}
           {draftVersion && !hasPublished && (
             <button onClick={() => navigate(`/build/${flow.id}/${draftVersion.id}`)}
-              style={{ flex: 1, padding: '8px 12px', background: '#1a2a10', color: 'var(--yellow)', border: '1px solid #3a4a10', borderRadius: '6px', fontSize: '12px', fontWeight: 500, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', transition: 'all 0.15s' }}
-              onMouseEnter={e => { e.currentTarget.style.background = '#232f14'; e.currentTarget.style.borderColor = '#5a7a10' }}
-              onMouseLeave={e => { e.currentTarget.style.background = '#1a2a10'; e.currentTarget.style.borderColor = '#3a4a10' }}>
+              style={{ flex: 1, padding: '8px 12px', background: '#f0fdf4', color: '#b45309', border: '1px solid #3a4a10', borderRadius: '6px', fontSize: '12px', fontWeight: 500, display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '6px', transition: 'all 0.15s' }}
+              onMouseEnter={e => { e.currentTarget.style.background = '#dcfce7'; e.currentTarget.style.borderColor = '#86efac' }}
+              onMouseLeave={e => { e.currentTarget.style.background = '#f0fdf4'; e.currentTarget.style.borderColor = '#d1fae5' }}>
               ✎ Edit Draft
             </button>
           )}
@@ -905,11 +977,11 @@ function AgentExecution() {
           </button>
 
           {testVersionId && (
-            <div style={{ marginBottom: '16px', padding: '8px 10px', background: '#1a1200', border: '1px solid #3a2e00', borderRadius: '6px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <div style={{ marginBottom: '16px', padding: '8px 10px', background: '#fffbeb', border: '1px solid #3a2e00', borderRadius: '6px', display: 'flex', alignItems: 'center', gap: '8px' }}>
               <span style={{ fontSize: '14px' }}>⚠</span>
               <div>
-                <div style={{ fontFamily: 'var(--mono)', fontSize: '9px', color: '#facc15', letterSpacing: '0.1em', fontWeight: 600 }}>TEST MODE</div>
-                <div style={{ fontSize: '10px', color: '#a08830', marginTop: '1px' }}>Running draft — not the published version</div>
+                <div style={{ fontFamily: 'var(--mono)', fontSize: '9px', color: '#b45309', letterSpacing: '0.1em', fontWeight: 600 }}>TEST MODE</div>
+                <div style={{ fontSize: '10px', color: '#92400e', marginTop: '1px' }}>Running draft — not the published version</div>
               </div>
             </div>
           )}
@@ -964,7 +1036,7 @@ function AgentExecution() {
       {/* Main */}
       <div style={{ flex: 1, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '48px', overflowY: 'auto' }}>
         {error && (
-          <div style={{ position: 'absolute', top: '20px', left: '50%', transform: 'translateX(-50%)', padding: '10px 16px', background: '#2a1010', border: '1px solid var(--red)', borderRadius: '6px', color: 'var(--red)', fontSize: '13px', zIndex: 10, whiteSpace: 'nowrap' }}>
+          <div style={{ position: 'absolute', top: '20px', left: '50%', transform: 'translateX(-50%)', padding: '10px 16px', background: '#fef2f2', border: '1px solid var(--red)', borderRadius: '6px', color: 'var(--red)', fontSize: '13px', zIndex: 10, whiteSpace: 'nowrap' }}>
             {error} <button onClick={() => setError(null)} style={{ marginLeft: '10px', opacity: 0.6, color: 'var(--red)' }}>✕</button>
           </div>
         )}
@@ -1087,7 +1159,7 @@ function ResultCard({ node, session, onRestart, feedbackRating, setFeedbackRatin
 
   return (
     <div style={{ width: '100%', maxWidth: '580px', animation: 'fadeUp 0.2s ease' }}>
-      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '7px 14px', borderRadius: '20px', marginBottom: '28px', background: isEscalation ? '#2a1010' : '#0d2a1a', border: `1px solid ${isEscalation ? '#5a2020' : '#1a5a2a'}`, color: isEscalation ? 'var(--red)' : 'var(--green)', fontFamily: 'var(--mono)', fontSize: '11px', letterSpacing: '0.08em' }}>
+      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px', padding: '7px 14px', borderRadius: '20px', marginBottom: '28px', background: isEscalation ? '#fef2f2' : '#f0fdf4', border: `1px solid ${isEscalation ? '#fca5a5' : '#86efac'}`, color: isEscalation ? 'var(--red)' : 'var(--green)', fontFamily: 'var(--mono)', fontSize: '11px', letterSpacing: '0.08em' }}>
         <span style={{ width: '6px', height: '6px', borderRadius: '50%', background: 'currentColor', animation: 'pulse 2s infinite' }} />
         {isEscalation ? 'ESCALATION REQUIRED' : 'RESOLVED'}
       </div>
@@ -1105,8 +1177,8 @@ function ResultCard({ node, session, onRestart, feedbackRating, setFeedbackRatin
       )}
 
       {isEscalation && (
-        <div style={{ padding: '16px 20px', background: '#180808', border: '1px solid #5a2020', borderRadius: '10px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '14px' }}>
-          <div style={{ width: '36px', height: '36px', borderRadius: '8px', background: '#2a1010', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px', flexShrink: 0 }}>⚠</div>
+        <div style={{ padding: '16px 20px', background: '#fef2f2', border: '1px solid #5a2020', borderRadius: '10px', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '14px' }}>
+          <div style={{ width: '36px', height: '36px', borderRadius: '8px', background: '#fef2f2', display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: '16px', flexShrink: 0 }}>⚠</div>
           <div>
             <div style={{ fontFamily: 'var(--mono)', fontSize: '10px', color: 'var(--red)', marginBottom: '4px', letterSpacing: '0.08em' }}>ESCALATE TO</div>
             <div style={{ fontSize: '14px', color: 'var(--text)', fontWeight: 500 }}>{node.metadata.escalate_to}</div>
@@ -1145,7 +1217,7 @@ function ResultCard({ node, session, onRestart, feedbackRating, setFeedbackRatin
           )}
         </div>
       ) : (
-        <div style={{ padding: '14px 18px', background: '#0d2a1a', border: '1px solid #1a5a2a', borderRadius: '8px', color: 'var(--green)', fontFamily: 'var(--mono)', fontSize: '12px', marginBottom: '20px' }}>
+        <div style={{ padding: '14px 18px', background: '#f0fdf4', border: '1px solid #1a5a2a', borderRadius: '8px', color: 'var(--green)', fontFamily: 'var(--mono)', fontSize: '12px', marginBottom: '20px' }}>
           ✓ Feedback submitted — thank you!
         </div>
       )}
@@ -1190,8 +1262,6 @@ function FlowBuilder() {
   const [publishing, setPublishing] = useState(false)
   const [showFlowAnalytics, setShowFlowAnalytics] = useState(false)
   const [flowAnalytics, setFlowAnalytics] = useState(null)
-  const [renamingFlow, setRenamingFlow] = useState(false)
-  const [renameValue, setRenameValue] = useState('')
   const { toasts, add: toast } = useToast()
 
   const nodePositions = useRef({})
@@ -1422,29 +1492,6 @@ function FlowBuilder() {
     } catch (e) { toast(e.message, 'error') }
   }
 
-  function startRename() {
-    setRenameValue(flow?.name || '')
-    setRenamingFlow(true)
-  }
-
-  async function commitRename() {
-    const name = renameValue.trim()
-    setRenamingFlow(false)
-    if (!name || name === flow?.name) return
-    try {
-      const updated = await api.updateFlow(flowId, { name })
-      setFlow(f => ({ ...f, name: updated.name }))
-      toast('Flow renamed')
-    } catch (e) {
-      toast(e.message, 'error')
-    }
-  }
-
-  function onRenameKeyDown(e) {
-    if (e.key === 'Enter') { e.preventDefault(); commitRename() }
-    if (e.key === 'Escape') { setRenamingFlow(false) }
-  }
-
   // --- Drag logic ---
   const dragging = useRef(null)
   const dragStart = useRef(null)
@@ -1544,7 +1591,7 @@ function FlowBuilder() {
           </div>
           <div style={{ display: 'flex', gap: '10px' }}>
             <button onClick={publish} disabled={publishing}
-              style={{ flex: 1, padding: '10px', background: 'var(--green)', color: '#000', borderRadius: '6px', fontSize: '13px', fontWeight: 600, opacity: publishing ? 0.7 : 1 }}>
+              style={{ flex: 1, padding: '10px', background: 'var(--green)', color: '#fff', borderRadius: '6px', fontSize: '13px', fontWeight: 600, opacity: publishing ? 0.7 : 1 }}>
               {publishing ? 'Publishing…' : '⬆ Publish Now'}
             </button>
             <button onClick={() => setPublishModal(false)} style={{ padding: '10px 16px', border: '1px solid var(--border)', color: 'var(--text2)', borderRadius: '6px', fontSize: '13px' }}>Cancel</button>
@@ -1602,36 +1649,9 @@ function FlowBuilder() {
           onMouseEnter={e => e.currentTarget.style.color = 'var(--text2)'}
           onMouseLeave={e => e.currentTarget.style.color = 'var(--text3)'}>← Back</button>
 
-        {renamingFlow ? (
-          <input
-            autoFocus
-            value={renameValue}
-            onChange={e => setRenameValue(e.target.value)}
-            onBlur={commitRename}
-            onKeyDown={onRenameKeyDown}
-            style={{
-              fontFamily: 'var(--mono)', fontSize: '12px', color: 'var(--text)',
-              background: 'var(--surface2)', border: '1px solid var(--accent)',
-              borderRadius: '4px', padding: '2px 8px', outline: 'none',
-              letterSpacing: '-0.01em', minWidth: '180px',
-            }}
-          />
-        ) : (
-          <div
-            onClick={startRename}
-            title="Click to rename"
-            style={{
-              fontFamily: 'var(--mono)', fontSize: '12px', color: 'var(--text2)',
-              marginRight: '4px', letterSpacing: '-0.01em', cursor: 'text',
-              padding: '2px 6px', borderRadius: '4px', border: '1px solid transparent',
-              transition: 'border-color 0.15s, color 0.15s',
-            }}
-            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text)' }}
-            onMouseLeave={e => { e.currentTarget.style.borderColor = 'transparent'; e.currentTarget.style.color = 'var(--text2)' }}
-          >
-            {flow?.name} <span style={{ opacity: 0.4, fontSize: '10px' }}>✎</span>
-          </div>
-        )}
+        <div style={{ fontFamily: 'var(--mono)', fontSize: '12px', color: 'var(--text2)', marginRight: '4px', letterSpacing: '-0.01em' }}>
+          {flow?.name}
+        </div>
         <div style={{ fontFamily: 'var(--mono)', fontSize: '10px', color: 'var(--text3)', padding: '2px 6px', border: '1px solid var(--border)', borderRadius: '3px' }}>
           v{version?.version_number} · {isPublished ? 'published' : 'draft'}
         </div>
@@ -1650,11 +1670,11 @@ function FlowBuilder() {
           <>
             <button onClick={() => hasStart && navigate(`/execute/${flowId}/${versionId}`)} disabled={!hasStart}
               title={hasStart ? 'Test this draft flow' : 'Set a start node first'}
-              style={{ padding: '6px 14px', background: hasStart ? '#0a1a2a' : 'var(--surface2)', color: hasStart ? 'var(--accent2)' : 'var(--text3)', border: `1px solid ${hasStart ? 'var(--accent)' : 'var(--border)'}`, borderRadius: '5px', fontSize: '12px', fontWeight: 500, transition: 'all 0.15s', opacity: hasStart ? 1 : 0.5, cursor: hasStart ? 'pointer' : 'not-allowed' }}>
+              style={{ padding: '6px 14px', background: hasStart ? '#eff6ff' : 'var(--surface2)', color: hasStart ? 'var(--accent2)' : 'var(--text3)', border: `1px solid ${hasStart ? 'var(--accent)' : 'var(--border)'}`, borderRadius: '5px', fontSize: '12px', fontWeight: 500, transition: 'all 0.15s', opacity: hasStart ? 1 : 0.5, cursor: hasStart ? 'pointer' : 'not-allowed' }}>
               ▶ Test
             </button>
             <button onClick={() => setPublishModal(true)} disabled={!hasStart}
-              style={{ padding: '6px 14px', background: hasStart ? 'var(--green)' : 'var(--surface2)', color: hasStart ? '#000' : 'var(--text3)', border: `1px solid ${hasStart ? 'var(--green)' : 'var(--border)'}`, borderRadius: '5px', fontSize: '12px', fontWeight: 600, transition: 'all 0.15s', opacity: hasStart ? 1 : 0.6 }}>
+              style={{ padding: '6px 14px', background: hasStart ? 'var(--green)' : 'var(--surface2)', color: hasStart ? '#fff' : 'var(--text3)', border: `1px solid ${hasStart ? 'var(--green)' : 'var(--border)'}`, borderRadius: '5px', fontSize: '12px', fontWeight: 600, transition: 'all 0.15s', opacity: hasStart ? 1 : 0.6 }}>
               ⬆ Publish
             </button>
           </>
@@ -1669,7 +1689,7 @@ function FlowBuilder() {
 
       {/* Validation hint */}
       {!isPublished && nodes.length > 0 && !hasStart && (
-        <div style={{ background: '#2a2010', borderBottom: '1px solid #3a3510', padding: '8px 20px', fontFamily: 'var(--mono)', fontSize: '11px', color: 'var(--yellow)' }}>
+        <div style={{ background: '#fffbeb', borderBottom: '1px solid #3a3510', padding: '8px 20px', fontFamily: 'var(--mono)', fontSize: '11px', color: '#b45309' }}>
           ⚠ No start node set. Click a node and mark it as start, or delete and recreate — first node auto-becomes start.
         </div>
       )}
@@ -1684,7 +1704,7 @@ function FlowBuilder() {
           <svg style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', pointerEvents: 'none' }}>
             <defs>
               <pattern ref={bgPatternRef} id="dots" x={pan.x % 20} y={pan.y % 20} width="20" height="20" patternUnits="userSpaceOnUse">
-                <circle cx="1" cy="1" r="1" fill="var(--border)" />
+                <circle cx="1" cy="1" r="1" fill="#dde3ed" />
               </pattern>
             </defs>
             <rect width="100%" height="100%" fill="url(#dots)" />
@@ -1722,7 +1742,7 @@ function FlowBuilder() {
             <svg ref={svgRef} style={{ position: 'absolute', left: 0, top: 0, width: '8000px', height: '8000px', pointerEvents: 'none', overflow: 'visible' }}>
               <defs>
                 <marker id="arrow" markerWidth="8" markerHeight="8" refX="8" refY="3" orient="auto">
-                  <path d="M0,0 L0,6 L8,3 z" fill="var(--border2)" />
+                  <path d="M0,0 L0,6 L8,3 z" fill="#94a3b8" />
                 </marker>
               </defs>
 
@@ -1820,7 +1840,7 @@ function FlowBuilder() {
                   <div style={{ padding: '9px 10px 8px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
                       <div style={{ width: '8px', height: '8px', borderRadius: '2px', background: typeColor, flexShrink: 0 }} />
-                      {node.is_start && <span style={{ fontFamily: 'var(--mono)', fontSize: '8px', color: 'var(--accent)', padding: '1px 5px', background: '#0d1a3a', borderRadius: '3px', border: '1px solid #1a2a5a' }}>START</span>}
+                      {node.is_start && <span style={{ fontFamily: 'var(--mono)', fontSize: '8px', color: 'var(--accent)', padding: '1px 5px', background: '#eff6ff', borderRadius: '3px', border: '1px solid #1a2a5a' }}>START</span>}
                       <span style={{ fontFamily: 'var(--mono)', fontSize: '9px', color: 'var(--text3)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{node.type}</span>
                     </div>
                     {!isPublished && (
@@ -1837,7 +1857,7 @@ function FlowBuilder() {
                   {!isPublished && node.type !== 'result' && (
                     <div style={{ padding: '6px 10px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
                       <button onClick={e => { e.stopPropagation(); setAddingEdge(node.id) }}
-                        style={{ fontSize: '10px', color: addingEdge === node.id ? '#fff' : 'var(--accent)', fontFamily: 'var(--mono)', padding: '3px 8px', border: `1px solid var(--accent)`, borderRadius: '3px', background: addingEdge === node.id ? 'var(--accent)' : '#0d1a3a', transition: 'all 0.15s' }}>
+                        style={{ fontSize: '10px', color: addingEdge === node.id ? '#fff' : 'var(--accent)', fontFamily: 'var(--mono)', padding: '3px 8px', border: `1px solid var(--accent)`, borderRadius: '3px', background: addingEdge === node.id ? 'var(--accent)' : '#eff6ff', transition: 'all 0.15s' }}>
                         {addingEdge === node.id ? '● connecting…' : '+ connect'}
                       </button>
                     </div>
@@ -2020,7 +2040,7 @@ function NodeEditPanel({ node, onSave, onClose }) {
       <div style={{ padding: '16px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
         <div style={{ fontFamily: 'var(--mono)', fontSize: '10px', color: 'var(--text3)', letterSpacing: '0.08em' }}>
           EDIT NODE
-          {dirty && <span style={{ marginLeft: '8px', color: 'var(--yellow)', fontSize: '9px' }}>● unsaved</span>}
+          {dirty && <span style={{ marginLeft: '8px', color: '#b45309', fontSize: '9px' }}>● unsaved</span>}
         </div>
         <button onClick={onClose} style={{ color: 'var(--text3)', fontSize: '18px', width: '28px', height: '28px', display: 'flex', alignItems: 'center', justifyContent: 'center', borderRadius: '4px' }}
           onMouseEnter={e => e.currentTarget.style.color = 'var(--text)'}
@@ -2032,7 +2052,7 @@ function NodeEditPanel({ node, onSave, onClose }) {
           <div style={{ display: 'flex', gap: '6px' }}>
             {['question', 'result'].map(t => (
               <button key={t} onClick={() => { setType(t); setDirty(true) }}
-                style={{ flex: 1, padding: '7px 4px', borderRadius: '5px', fontSize: '11px', fontFamily: 'var(--mono)', border: `1px solid ${type === t ? 'var(--accent)' : 'var(--border)'}`, background: type === t ? '#0d1a3a' : 'var(--surface2)', color: type === t ? 'var(--accent2)' : 'var(--text3)', transition: 'all 0.15s' }}>
+                style={{ flex: 1, padding: '7px 4px', borderRadius: '5px', fontSize: '11px', fontFamily: 'var(--mono)', border: `1px solid ${type === t ? 'var(--accent)' : 'var(--border)'}`, background: type === t ? '#eff6ff' : 'var(--surface2)', color: type === t ? 'var(--accent2)' : 'var(--text3)', transition: 'all 0.15s' }}>
                 {t}
               </button>
             ))}
@@ -2046,15 +2066,15 @@ function NodeEditPanel({ node, onSave, onClose }) {
               width: '100%', padding: '8px 12px', borderRadius: '6px', fontSize: '12px',
               fontFamily: 'var(--mono)', textAlign: 'left',
               display: 'flex', alignItems: 'center', gap: '10px',
-              border: `1px solid ${isStart ? '#1a4a2a' : 'var(--border)'}`,
-              background: isStart ? '#0a2a14' : 'var(--surface2)',
+              border: `1px solid ${isStart ? '#86efac' : 'var(--border)'}`,
+              background: isStart ? '#f0fdf4' : 'var(--surface2)',
               color: isStart ? 'var(--green)' : 'var(--text3)',
               transition: 'all 0.15s', cursor: 'pointer',
             }}>
             <span style={{
               width: '14px', height: '14px', borderRadius: '50%', flexShrink: 0,
-              border: `2px solid ${isStart ? 'var(--green)' : 'var(--border2)'}`,
-              background: isStart ? 'var(--green)' : 'transparent',
+              border: `2px solid ${isStart ? '#16a34a' : 'var(--border2)'}`,
+              background: isStart ? '#16a34a' : 'transparent',
               display: 'flex', alignItems: 'center', justifyContent: 'center',
               transition: 'all 0.15s',
             }}>
@@ -2114,17 +2134,20 @@ export default function App() {
   const isExecution = location.pathname.startsWith('/execute')
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
-      {!isExecution && <Nav />}
-      <div style={{ flex: 1, overflow: 'hidden' }}>
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/analytics" element={<AnalyticsDashboard />} />
-          <Route path="/build/:flowId/:versionId" element={<FlowBuilder />} />
-          <Route path="/execute/:flowId" element={<AgentExecution />} />
-          <Route path="/execute/:flowId/:versionId" element={<AgentExecution />} />
-        </Routes>
+    <>
+      <GlobalStyle />
+      <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
+        {!isExecution && <Nav />}
+        <div style={{ flex: 1, overflow: 'hidden' }}>
+          <Routes>
+            <Route path="/" element={<Dashboard />} />
+            <Route path="/analytics" element={<AnalyticsDashboard />} />
+            <Route path="/build/:flowId/:versionId" element={<FlowBuilder />} />
+            <Route path="/execute/:flowId" element={<AgentExecution />} />
+            <Route path="/execute/:flowId/:versionId" element={<AgentExecution />} />
+          </Routes>
+        </div>
       </div>
-    </div>
+    </>
   )
 }
