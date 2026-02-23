@@ -1190,6 +1190,8 @@ function FlowBuilder() {
   const [publishing, setPublishing] = useState(false)
   const [showFlowAnalytics, setShowFlowAnalytics] = useState(false)
   const [flowAnalytics, setFlowAnalytics] = useState(null)
+  const [renamingFlow, setRenamingFlow] = useState(false)
+  const [renameValue, setRenameValue] = useState('')
   const { toasts, add: toast } = useToast()
 
   const nodePositions = useRef({})
@@ -1420,6 +1422,29 @@ function FlowBuilder() {
     } catch (e) { toast(e.message, 'error') }
   }
 
+  function startRename() {
+    setRenameValue(flow?.name || '')
+    setRenamingFlow(true)
+  }
+
+  async function commitRename() {
+    const name = renameValue.trim()
+    setRenamingFlow(false)
+    if (!name || name === flow?.name) return
+    try {
+      const updated = await api.updateFlow(flowId, { name })
+      setFlow(f => ({ ...f, name: updated.name }))
+      toast('Flow renamed')
+    } catch (e) {
+      toast(e.message, 'error')
+    }
+  }
+
+  function onRenameKeyDown(e) {
+    if (e.key === 'Enter') { e.preventDefault(); commitRename() }
+    if (e.key === 'Escape') { setRenamingFlow(false) }
+  }
+
   // --- Drag logic ---
   const dragging = useRef(null)
   const dragStart = useRef(null)
@@ -1577,9 +1602,36 @@ function FlowBuilder() {
           onMouseEnter={e => e.currentTarget.style.color = 'var(--text2)'}
           onMouseLeave={e => e.currentTarget.style.color = 'var(--text3)'}>← Back</button>
 
-        <div style={{ fontFamily: 'var(--mono)', fontSize: '12px', color: 'var(--text2)', marginRight: '4px', letterSpacing: '-0.01em' }}>
-          {flow?.name}
-        </div>
+        {renamingFlow ? (
+          <input
+            autoFocus
+            value={renameValue}
+            onChange={e => setRenameValue(e.target.value)}
+            onBlur={commitRename}
+            onKeyDown={onRenameKeyDown}
+            style={{
+              fontFamily: 'var(--mono)', fontSize: '12px', color: 'var(--text)',
+              background: 'var(--surface2)', border: '1px solid var(--accent)',
+              borderRadius: '4px', padding: '2px 8px', outline: 'none',
+              letterSpacing: '-0.01em', minWidth: '180px',
+            }}
+          />
+        ) : (
+          <div
+            onClick={startRename}
+            title="Click to rename"
+            style={{
+              fontFamily: 'var(--mono)', fontSize: '12px', color: 'var(--text2)',
+              marginRight: '4px', letterSpacing: '-0.01em', cursor: 'text',
+              padding: '2px 6px', borderRadius: '4px', border: '1px solid transparent',
+              transition: 'border-color 0.15s, color 0.15s',
+            }}
+            onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border)'; e.currentTarget.style.color = 'var(--text)' }}
+            onMouseLeave={e => { e.currentTarget.style.borderColor = 'transparent'; e.currentTarget.style.color = 'var(--text2)' }}
+          >
+            {flow?.name} <span style={{ opacity: 0.4, fontSize: '10px' }}>✎</span>
+          </div>
+        )}
         <div style={{ fontFamily: 'var(--mono)', fontSize: '10px', color: 'var(--text3)', padding: '2px 6px', border: '1px solid var(--border)', borderRadius: '3px' }}>
           v{version?.version_number} · {isPublished ? 'published' : 'draft'}
         </div>

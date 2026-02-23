@@ -593,6 +593,7 @@ function TextToFlowTab({ onGenerated, onError }) {
         nodes, edges,
         warnings,
         flowName: description.trim().split(/[.!?\n]/)[0].slice(0, 60),
+        isTextGenerated: true,
       })
     } catch (err) {
       onError(`Generation failed: ${err.message}`)
@@ -797,8 +798,44 @@ export default function VisioImportModal({ onClose, onImported }) {
   }
 
   // ── Image AI parse result handler ─────────────────────────
-  function handleImageParsed({ nodes: parsedNodes, edges: parsedEdges, warnings, fileName, flowName: suggestedName }) {
-    // Text-to-flow passes flowName; Visio/image passes fileName
+  async function handleImageParsed({ nodes: parsedNodes, edges: parsedEdges, warnings, fileName, flowName: suggestedName, isTextGenerated }) {
+    // Text-to-flow: auto-save and open directly in the real flow builder
+    if (isTextGenerated) {
+      const rawName = suggestedName || 'AI-generated flow'
+      setSaving(true)
+      setError('')
+      try {
+        const flow = await req('POST', '/flows', { name: rawName.trim() })
+        const draftVersion = (flow.versions || []).find(v => v.status === 'draft')
+        const versionId = draftVersion?.id || (flow.versions || [])[0]?.id
+        if (!versionId) throw new Error('Server did not return a version ID')
+
+        await req('POST', `/versions/${versionId}/import`, {
+          nodes: parsedNodes.map(n => ({
+            tempId: n.tempId,
+            type: n.type,
+            title: n.title || 'Untitled step',
+            body: n.body || '',
+            position: n.position,
+            is_start: n.is_start,
+            metadata: n.type === 'result' ? { resolution: n.resolution || '', escalate_to: null } : {},
+          })),
+          edges: parsedEdges.map(e => ({
+            sourceId: e.sourceId,
+            targetId: e.targetId,
+            label: e.label || '',
+          })),
+        })
+
+        onImported({ flowId: flow.id, versionId, flowName: rawName, published: false })
+      } catch (err) {
+        setError(`Save failed: ${err.message}`)
+        setSaving(false)
+      }
+      return
+    }
+
+    // Visio: go to review step as normal
     const rawName = suggestedName || (fileName ? fileName.replace(/\.[^.]+$/, '').replace(/[-_]/g, ' ') : '')
     setFlowName(rawName)
     setParseWarnings([
@@ -938,8 +975,19 @@ export default function VisioImportModal({ onClose, onImported }) {
         <div style={{ padding: '24px', overflowY: 'auto', flex: 1, display: 'flex', flexDirection: 'column' }}>
           <Steps current={step === 0 ? 0 : step === 1 ? 1 : 2} />
 
+          {/* ── AUTO-SAVING OVERLAY (text flow) ── */}
+          {saving && step === 0 && (
+            <div style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: '20px', padding: '40px' }}>
+              <div style={{ fontSize: '32px', animation: 'spin 1s linear infinite' }}>✦</div>
+              <div style={{ fontSize: '14px', color: '#8a9aba', textAlign: 'center' }}>
+                Saving flow to builder…
+              </div>
+              <style>{`@keyframes spin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }`}</style>
+            </div>
+          )}
+
           {/* ── STEP 0: Upload ── */}
-          {step === 0 && (
+          {step === 0 && !saving && (
             <div style={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
               <ImportTypeTabs active={importType} onChange={t => { setImportType(t); setError('') }} />
 
