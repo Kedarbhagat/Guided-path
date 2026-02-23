@@ -400,11 +400,15 @@ function Dashboard() {
           onClose={() => setShowVisioImport(false)}
           onImported={({ flowId, versionId, flowName, published }) => {
             setShowVisioImport(false)
-            const msg = published
-              ? `Flow "${flowName}" imported & published — opening builder…`
-              : `Flow "${flowName}" saved — opening editor…`
-            toast(msg, 'success')
-            navigate(`/build/${flowId}/${versionId}`)
+            if (published) {
+              // Published: stay on dashboard and refresh
+              toast(`Flow "${flowName}" imported and published!`, 'success')
+              load()
+            } else {
+              // Draft: go straight to the builder so they can edit immediately
+              toast(`Flow "${flowName}" saved — opening editor…`, 'success')
+              navigate(`/build/${flowId}/${versionId}`)
+            }
           }}
         />
       )}
@@ -1244,6 +1248,74 @@ function ResultCard({ node, session, onRestart, feedbackRating, setFeedbackRatin
 const NODE_W = 210
 const NODE_H = 90
 
+// ── FLOW NAME EDITOR ──────────────────────────────────────────
+function FlowNameEditor({ flow, onRename }) {
+  const [editing, setEditing] = useState(false)
+  const [value, setValue] = useState('')
+  const [saving, setSaving] = useState(false)
+  const inputRef = useRef(null)
+
+  function startEdit() {
+    setValue(flow?.name || '')
+    setEditing(true)
+    setTimeout(() => { inputRef.current?.select() }, 30)
+  }
+
+  async function commit() {
+    const trimmed = value.trim()
+    if (!trimmed || trimmed === flow?.name) { setEditing(false); return }
+    setSaving(true)
+    await onRename(trimmed)
+    setSaving(false)
+    setEditing(false)
+  }
+
+  function onKeyDown(e) {
+    if (e.key === 'Enter') { e.preventDefault(); commit() }
+    if (e.key === 'Escape') setEditing(false)
+  }
+
+  if (editing) {
+    return (
+      <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+        <input
+          ref={inputRef}
+          value={value}
+          onChange={e => setValue(e.target.value)}
+          onKeyDown={onKeyDown}
+          onBlur={commit}
+          disabled={saving}
+          style={{
+            fontFamily: 'var(--mono)', fontSize: '12px', color: 'var(--text)',
+            background: 'var(--surface2)', border: '1px solid var(--accent)',
+            borderRadius: '4px', padding: '3px 8px', outline: 'none',
+            minWidth: '160px', maxWidth: '300px', letterSpacing: '-0.01em',
+          }}
+        />
+        {saving && <span style={{ fontSize: '10px', color: 'var(--text3)', fontFamily: 'var(--mono)' }}>saving…</span>}
+      </div>
+    )
+  }
+
+  return (
+    <button
+      onClick={startEdit}
+      title="Click to rename"
+      style={{
+        fontFamily: 'var(--mono)', fontSize: '12px', color: 'var(--text2)',
+        marginRight: '4px', letterSpacing: '-0.01em', background: 'none',
+        border: '1px solid transparent', borderRadius: '4px', padding: '3px 6px',
+        cursor: 'pointer', display: 'flex', alignItems: 'center', gap: '6px',
+        transition: 'border-color 0.15s, background 0.15s',
+      }}
+      onMouseEnter={e => { e.currentTarget.style.borderColor = 'var(--border2)'; e.currentTarget.style.background = 'var(--surface2)' }}
+      onMouseLeave={e => { e.currentTarget.style.borderColor = 'transparent'; e.currentTarget.style.background = 'none' }}>
+      {flow?.name}
+      <span style={{ fontSize: '10px', color: 'var(--text3)', opacity: 0.7 }}>✎</span>
+    </button>
+  )
+}
+
 function FlowBuilder() {
   const { flowId, versionId } = useParams()
   const navigate = useNavigate()
@@ -1649,9 +1721,13 @@ function FlowBuilder() {
           onMouseEnter={e => e.currentTarget.style.color = 'var(--text2)'}
           onMouseLeave={e => e.currentTarget.style.color = 'var(--text3)'}>← Back</button>
 
-        <div style={{ fontFamily: 'var(--mono)', fontSize: '12px', color: 'var(--text2)', marginRight: '4px', letterSpacing: '-0.01em' }}>
-          {flow?.name}
-        </div>
+        <FlowNameEditor flow={flow} onRename={async (newName) => {
+          try {
+            const updated = await api.updateFlow(flowId, { name: newName })
+            setFlow(prev => ({ ...prev, name: updated.name }))
+            toast('Flow renamed', 'success')
+          } catch (e) { toast(e.message, 'error') }
+        }} />
         <div style={{ fontFamily: 'var(--mono)', fontSize: '10px', color: 'var(--text3)', padding: '2px 6px', border: '1px solid var(--border)', borderRadius: '3px' }}>
           v{version?.version_number} · {isPublished ? 'published' : 'draft'}
         </div>
