@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { api } from '../../api'
-import { Modal } from '../ui'
+import { Modal, LinkifiedText } from '../ui'
 
 export default function AgentExecution() {
   const { flowId, versionId: testVersionId } = useParams()
@@ -360,7 +360,7 @@ function QuestionCard({ node, options, onSelect, onBack, onRestart, stepping, se
 
       {node.body && (
         <p style={{ color: 'var(--text2)', fontSize: '14px', lineHeight: 1.65, marginBottom: '36px' }}>
-          {node.body}
+          <LinkifiedText text={node.body} />
         </p>
       )}
       {!node.body && <div style={{ marginBottom: '36px' }} />}
@@ -453,7 +453,7 @@ function ResultCard({ node, session, onRestart, feedbackRating, setFeedbackRatin
 
       {node.metadata?.resolution && (
         <div style={{ position: 'relative', padding: '20px 22px', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: '10px', fontSize: '14px', lineHeight: 1.7, color: 'var(--text2)', marginBottom: '16px' }}>
-          {node.metadata.resolution}
+          <LinkifiedText text={node.metadata.resolution} />
           <button onClick={copyResolution}
             style={{ position: 'absolute', top: '12px', right: '12px', padding: '4px 8px', background: 'var(--surface2)', border: '1px solid var(--border)', borderRadius: '4px', color: 'var(--text3)', fontSize: '11px', transition: 'all 0.15s' }}>
             {copied ? '✓ Copied' : '⎘ Copy'}

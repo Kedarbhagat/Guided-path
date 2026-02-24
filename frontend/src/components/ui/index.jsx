@@ -189,6 +189,42 @@ export function StatMini({ label, value }) {
   )
 }
 
+// ─── LINKIFIED TEXT ───────────────────────────────────────────
+// Renders plain text but converts any URLs into clickable links
+
+const URL_REGEX = /(https?:\/\/[^\s<>"')\]]+)/g
+
+export function LinkifiedText({ text, style }) {
+  if (!text) return null
+
+  const parts = text.split(URL_REGEX)
+
+  return (
+    <span style={style}>
+      {parts.map((part, i) =>
+        URL_REGEX.test(part) ? (
+          <a
+            key={i}
+            href={part}
+            target="_blank"
+            rel="noopener noreferrer"
+            style={{
+              color: 'var(--accent)',
+              textDecoration: 'underline',
+              textDecorationColor: 'var(--accent2)',
+              wordBreak: 'break-all',
+            }}
+            onClick={e => e.stopPropagation()}>
+            {part}
+          </a>
+        ) : (
+          part
+        )
+      )}
+    </span>
+  )
+}
+
 export function PanelField({ label, children }) {
   return (
     <div style={{ marginBottom: '18px' }}>

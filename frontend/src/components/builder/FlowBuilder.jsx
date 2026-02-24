@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { api } from '../../api'
 import { useToast } from '../../hooks'
-import { ToastContainer, Modal, ConfirmDialog, ToolbarBtn, PanelField } from '../ui'
+import { ToastContainer, Modal, ConfirmDialog, ToolbarBtn, PanelField, LinkifiedText } from '../ui'
 
 const NODE_W = 210
 const NODE_H = 90
@@ -575,7 +575,7 @@ export default function FlowBuilder() {
                   </div>
                   <div style={{ padding: '10px 12px' }}>
                     <div style={{ fontSize: '12px', lineHeight: 1.45, color: 'var(--text)', fontWeight: 500 }}>{node.title}</div>
-                    {node.body && <div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '4px', lineHeight: 1.4 }}>{node.body.slice(0, 50)}{node.body.length > 50 ? '…' : ''}</div>}
+                    {node.body && <div style={{ fontSize: '11px', color: 'var(--text3)', marginTop: '4px', lineHeight: 1.4 }}><LinkifiedText text={node.body.slice(0, 50) + (node.body.length > 50 ? '…' : '')} /></div>}
                   </div>
                   {!isPublished && node.type !== 'result' && (
                     <div style={{ padding: '6px 10px', borderTop: '1px solid var(--border)', display: 'flex', alignItems: 'center', justifyContent: 'flex-end' }}>
@@ -615,10 +615,14 @@ export default function FlowBuilder() {
             </div>
             <div style={{ fontFamily: 'var(--mono)', fontSize: '9px', color: 'var(--text3)', marginBottom: '4px' }}>{editingNode.type?.toUpperCase()}</div>
             <div style={{ fontSize: '14px', fontWeight: 500, marginBottom: '8px' }}>{editingNode.title}</div>
-            {editingNode.body && <div style={{ fontSize: '13px', color: 'var(--text2)', lineHeight: 1.6, marginBottom: '12px' }}>{editingNode.body}</div>}
+            {editingNode.body && (
+              <div style={{ fontSize: '13px', color: 'var(--text2)', lineHeight: 1.6, marginBottom: '12px' }}>
+                <LinkifiedText text={editingNode.body} />
+              </div>
+            )}
             {editingNode.metadata?.resolution && (
               <div style={{ fontSize: '12px', color: 'var(--text3)', lineHeight: 1.6, padding: '10px', background: 'var(--surface2)', borderRadius: '5px' }}>
-                {editingNode.metadata.resolution}
+                <LinkifiedText text={editingNode.metadata.resolution} />
               </div>
             )}
           </div>
