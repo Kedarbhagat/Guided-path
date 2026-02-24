@@ -618,12 +618,12 @@ function TextToFlowTab({ onGenerated, onError }) {
 
       {/* AI badge + provider toggle */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '10px' }}>
-        <div style={{
+        {/* <div style={{
           display: 'flex', alignItems: 'center', gap: '6px',
           padding: '4px 12px', borderRadius: '20px',
           background: 'linear-gradient(135deg, #eff6ff, #f5f3ff)',
           border: '1px solid #a5b4fc', fontSize: '11px', fontFamily: 'monospace', color: '#4f46e5',
-        }}>✦ AI-POWERED</div>
+        }}>✦ AI-POWERED</div> */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
           <span style={{ fontSize: '10px', color: '#94a3b8', fontFamily: 'monospace' }}>MODEL</span>
           {[
@@ -714,7 +714,7 @@ function TextToFlowTab({ onGenerated, onError }) {
 // ── Tab switcher ──────────────────────────────────────────────
 function ImportTypeTabs({ active, onChange }) {
   const tabs = [
-    { id: 'text', label: '✦ Describe in Text', sub: 'AI-powered' },
+    { id: 'text', label: '✦ Describe in Text', sub: 'GenAi' },
     { id: 'visio', label: '⬡ Visio (.vsdx)', sub: 'Direct parse' },
   ]
   return (

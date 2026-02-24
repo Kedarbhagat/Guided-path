@@ -18,7 +18,24 @@ except ImportError:
 
 ai_bp = Blueprint("ai", __name__, url_prefix="/api/v1/flows")
 
-TEXT_TO_FLOW_PROMPT = """You are a flow builder expert. Convert a natural language description into a structured decision/resolution flow used by support agents.
+# ── Prompts ────────────────────────────────────────────────────
+
+REWRITE_PROMPT = """You are a support flow description rewriter.
+
+The user has described a support process — it may be written as bullet points, a numbered list, rough notes, or a paragraph. Your job is to rewrite it as a clear, branching narrative that an AI flow generator can turn into a decision tree.
+
+Rules:
+- Use "if/then" language throughout
+- Every step must have an explicit outcome for BOTH success (yes/resolved) AND failure (no/escalate)
+- State who to escalate to and what information to include in every escalation path
+- Do not add new steps or invent information — only rewrite what the user provided
+- Write in plain prose — no bullet points, no numbered lists, no markdown
+- Be explicit: avoid vague phrases like "handle normally" or "follow standard process"
+- If the user's input implies a check or action, make it explicit in the rewrite
+
+Return ONLY the rewritten description as plain text. No explanation. No preamble."""
+
+TEXT_TO_FLOW_PROMPT = """You are an expert support flow architect. Convert a natural language description into a comprehensive, detailed decision/resolution flow for support agents.
 
 Return ONLY a valid JSON object with this exact structure (no markdown, no explanation):
 {
@@ -27,7 +44,7 @@ Return ONLY a valid JSON object with this exact structure (no markdown, no expla
       "id": "0",
       "title": "Short question or step title",
       "type": "question",
-      "body": "Brief context for this step (max 15 words)",
+      "body": "Detailed context giving the agent full instructions on what to check, ask, or do at this step. Include specific actions, what to look for, and why this step matters.",
       "is_start": true,
       "position": {"x": 60, "y": 60}
     }
@@ -45,29 +62,39 @@ Return ONLY a valid JSON object with this exact structure (no markdown, no expla
 CRITICAL: All node "id" values and edge "source"/"target" values MUST be strings (e.g. "0", "1", "2").
 
 Node rules:
-- "question": any step where the agent asks, checks, or takes an action
-- "result": final outcomes — resolutions, escalations, solutions
+- "question": any step where the agent asks, checks, investigates, or takes an action
+- "result": final outcomes only — resolutions, escalations, closures. Must include full resolution steps in "body"
 - Exactly ONE node must have "is_start": true
-- Every branch must reach a "result" node
-- Keep "body" under 15 words — brevity helps fit more nodes in the response
+- EVERY branch must end at a "result" node — no dead ends allowed
+- Every possible outcome from the description must be represented, including edge cases, partial failures, and escalation paths
+
+Body rules (IMPORTANT):
+- "question" nodes: write 2-4 sentences. Explain exactly what the agent should ask or do, what to look for, and what constitutes a yes vs no answer. Give the agent enough context to act without referring back to the description.
+- "result" nodes: write full step-by-step resolution instructions the agent should follow or communicate to the customer. Be specific — include what to tell the customer, what to log in the system, and any follow-up actions required.
+- Do NOT use vague language like "handle the issue", "resolve normally", or "follow standard process" — be fully explicit at every step.
 
 Position rules:
 - Start node at x=60, y=60
-- Space nodes 300px apart horizontally, 180px apart vertically
-- Branch left/right for yes/no decisions, downward for linear steps
+- Space nodes 320px apart horizontally, 200px apart vertically
+- Branch left for "yes/resolved", right for "no/escalate", downward for linear follow-up steps
 
 Edge rules:
 - source and target are STRING node ids
-- Labels should be short: "yes", "no", "resolved", "escalate", etc.
-- Every "question" node must have at least one outgoing edge
+- Labels must clearly describe the condition: "yes", "no", "all devices", "one device", "lights normal", "lights error", "resolved", "not resolved", "escalate", etc.
+- Every "question" node MUST have at least one outgoing edge — no orphan nodes
+- Capture ALL branching paths described — do not collapse or skip branches
 
 Quality rules:
-- Keep titles short (under 60 chars)
-- 5-15 nodes is ideal — capture all branches but don't over-engineer
-- Capture ALL decision branches including escalation paths
+- Titles: short and scannable, under 60 chars
+- Aim for 10-20 nodes — be thorough, explore every branch in the description
+- Do not merge separate branches into one node just to save space
+- If the description implies a step (e.g. "check the outage dashboard"), create an explicit node for it
+- Escalation paths must specify who to escalate to and what information to include in the handoff
 
 Return ONLY the JSON object. No markdown fences. No explanation."""
 
+
+# ── JSON parser ────────────────────────────────────────────────
 
 def _parse_ai_json(raw_text):
     if not raw_text:
@@ -212,6 +239,106 @@ def _normalize_nodes_and_edges(nodes, edges):
     return nodes, valid_edges, warnings
 
 
+# ── Preprocessing: rewrite any input into a branching narrative ────────────────
+
+def _rewrite_description_gemini(description, app_config, logger):
+    """Use Gemini to rewrite the user's input into a branching narrative."""
+    api_key = app_config.get("GEMINI_API_KEY")
+    model = app_config.get("GEMINI_MODEL", "gemini-2.0-flash").replace("models/", "")
+    client = _genai.Client(api_key=api_key)
+
+    try:
+        response = client.models.generate_content(
+            model=model,
+            contents=(
+                "Rewrite this support process description into a clear branching narrative:\n\n"
+                + description
+            ),
+            config=_genai_types.GenerateContentConfig(
+                system_instruction=REWRITE_PROMPT,
+                temperature=0.1,
+                max_output_tokens=2048,
+            ),
+        )
+        rewritten = (response.text or "").strip()
+        if rewritten and len(rewritten) > 20:
+            logger.info(
+                "Gemini rewrite succeeded: %d chars -> %d chars",
+                len(description), len(rewritten),
+            )
+            return rewritten
+    except Exception as e:
+        logger.warning("Gemini rewrite failed (will use original): %s", e)
+
+    return description
+
+
+def _rewrite_description_groq(description, app_config, logger):
+    """Use Groq to rewrite the user's input into a branching narrative."""
+    api_key = app_config.get("GROQ_API_KEY")
+    model = app_config.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+    client = _Groq(api_key=api_key)
+
+    try:
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": REWRITE_PROMPT},
+                {
+                    "role": "user",
+                    "content": (
+                        "Rewrite this support process description into a clear branching narrative:\n\n"
+                        + description
+                    ),
+                },
+            ],
+            temperature=0.1,
+            max_tokens=2048,
+        )
+        rewritten = (response.choices[0].message.content or "").strip()
+        if rewritten and len(rewritten) > 20:
+            logger.info(
+                "Groq rewrite succeeded: %d chars -> %d chars",
+                len(description), len(rewritten),
+            )
+            return rewritten
+    except Exception as e:
+        logger.warning("Groq rewrite failed (will use original): %s", e)
+
+    return description
+
+
+def _rewrite_description(description, provider, app_config, logger):
+    """
+    Preprocess the user's raw description into a branching narrative
+    before passing it to the flow generator. Skipped if the input
+    already looks like a branching narrative. Falls back gracefully.
+    """
+    looks_like_list = bool(re.search(r'^\s*[\d\-\*\u2022]', description, re.MULTILINE))
+    has_branching = any(
+        kw in description.lower()
+        for kw in ["if ", "then ", "if the", "if it", "when ", "otherwise", "else "]
+    )
+
+    # Already a well-formed branching narrative — no rewrite needed
+    if has_branching and not looks_like_list:
+        logger.info("Description already has branching language — skipping rewrite.")
+        return description
+
+    logger.info(
+        "Preprocessing description (looks_like_list=%s, has_branching=%s)",
+        looks_like_list, has_branching,
+    )
+
+    if provider == "groq" and GROQ_AVAILABLE and app_config.get("GROQ_API_KEY"):
+        return _rewrite_description_groq(description, app_config, logger)
+    elif GEMINI_AVAILABLE and app_config.get("GEMINI_API_KEY"):
+        return _rewrite_description_gemini(description, app_config, logger)
+
+    # No provider available — use original as-is
+    return description
+
+
 # ── Provider implementations ───────────────────────────────────
 
 def _generate_with_gemini(description, app_config, logger):
@@ -237,7 +364,9 @@ def _generate_with_gemini(description, app_config, logger):
             ),
         )
 
-    response = _call(f"Convert this flow description into a structured JSON flow:\n\n{description}")
+    response = _call(
+        f"Convert this flow description into a structured JSON flow:\n\n{description}"
+    )
     raw = (response.text or "").strip()
     truncated = _is_truncated(response)
     logger.info(
@@ -288,7 +417,9 @@ def _generate_with_groq(description, app_config, logger):
             response_format={"type": "json_object"},
         )
 
-    response = _call(f"Convert this flow description into a structured JSON flow:\n\n{description}")
+    response = _call(
+        f"Convert this flow description into a structured JSON flow:\n\n{description}"
+    )
     raw = (response.choices[0].message.content or "").strip()
     logger.info("Groq attempt 1: model=%s, raw_len=%d", model, len(raw))
 
@@ -357,11 +488,21 @@ def generate_flow_from_text():
     if provider not in ("gemini", "groq"):
         return jsonify({"error": "Invalid provider. Must be 'gemini' or 'groq'."}), 400
 
+    # ── Step 1: Preprocess — normalise any input style into a branching narrative ──
+    rewritten = _rewrite_description(
+        description, provider, current_app.config, current_app.logger
+    )
+
+    # ── Step 2: Generate the structured flow from the cleaned description ─────────
     try:
         if provider == "groq":
-            parsed, model_used = _generate_with_groq(description, current_app.config, current_app.logger)
+            parsed, model_used = _generate_with_groq(
+                rewritten, current_app.config, current_app.logger
+            )
         else:
-            parsed, model_used = _generate_with_gemini(description, current_app.config, current_app.logger)
+            parsed, model_used = _generate_with_gemini(
+                rewritten, current_app.config, current_app.logger
+            )
 
     except RuntimeError as exc:
         return jsonify({"error": str(exc)}), 503
@@ -393,6 +534,7 @@ def generate_flow_from_text():
     audit("flow.generate_from_text", payload={
         "provider": provider,
         "description_length": len(description),
+        "rewritten_length": len(rewritten),
         "node_count": len(nodes),
         "edge_count": len(valid_edges),
     })
@@ -401,5 +543,7 @@ def generate_flow_from_text():
         "nodes": nodes,
         "edges": valid_edges,
         "suggestions": warnings,
+        # Expose the rewritten description so the frontend can optionally show it
+        "rewritten_description": rewritten if rewritten != description else None,
         "meta": {"model": model_used, "provider": provider},
     })
