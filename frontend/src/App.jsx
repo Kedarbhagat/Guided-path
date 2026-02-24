@@ -7,6 +7,7 @@ import Dashboard from './components/dashboard/Dashboard'
 import AnalyticsDashboard from './components/analytics/AnalyticsDashboard'
 import FlowBuilder from './components/builder/FlowBuilder'
 import AgentExecution from './components/execution/AgentExecution'
+import FlowSuggestions from './components/dashboard/FlowSuggestions'
 
 export default function App() {
   const location = useLocation()
@@ -24,6 +25,7 @@ export default function App() {
             <Route path="/build/:flowId/:versionId" element={<FlowBuilder />} />
             <Route path="/execute/:flowId" element={<AgentExecution />} />
             <Route path="/execute/:flowId/:versionId" element={<AgentExecution />} />
+            <Route path="/flow-suggestions" element={<FlowSuggestions />} />
           </Routes>
         </div>
       </div>

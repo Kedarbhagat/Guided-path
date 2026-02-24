@@ -37,6 +37,8 @@ export const api = {
   createNode: (vId, d) => req('POST', `/versions/${vId}/nodes`, d),
   updateNode: (vId, nId, d) => req('PUT', `/versions/${vId}/nodes/${nId}`, d),
   deleteNode: (vId, nId) => req('DELETE', `/versions/${vId}/nodes/${nId}`),
+  bulkUpdatePositions: (vId, positions) => req('PUT', `/versions/${vId}/nodes/bulk-position`, { positions }),
+  batchImport: (vId, d) => req('POST', `/versions/${vId}/import`, d),
 
   // Edges
   createEdge: (vId, d) => req('POST', `/versions/${vId}/edges`, d),
@@ -45,14 +47,28 @@ export const api = {
 
   // Sessions
   startSession: (d) => req('POST', '/sessions', d),
+  getSession: (id) => req('GET', `/sessions/${id}`),
+  listSessions: (params = {}) => {
+    const q = new URLSearchParams(params).toString()
+    return req('GET', `/sessions${q ? '?' + q : ''}`)
+  },
   submitStep: (id, edgeId) => req('POST', `/sessions/${id}/step`, { edge_id: edgeId }),
   goBack: (id) => req('POST', `/sessions/${id}/back`),
   restartSession: (id) => req('POST', `/sessions/${id}/restart`),
   submitFeedback: (id, d) => req('POST', `/sessions/${id}/feedback`, d),
   exportSession: (id) => req('GET', `/sessions/${id}/export`),
 
+  // AI
+  suggestFlow: (issue, provider = 'groq') => req('POST', '/flows/suggest', { issue, provider }),
+  getAIProviders: () => req('GET', '/flows/providers'),
+  generateFlowFromText: (description, provider = 'groq') => req('POST', '/flows/generate-from-text', { description, provider }),
+
   // Misc
   getCategories: () => req('GET', '/categories'),
   getAnalyticsOverview: () => req('GET', '/analytics/overview'),
   getFlowAnalytics: (id) => req('GET', `/analytics/flows/${id}`),
+  getAuditLogs: (params = {}) => {
+    const q = new URLSearchParams(params).toString()
+    return req('GET', `/audit-logs${q ? '?' + q : ''}`)
+  },
 }

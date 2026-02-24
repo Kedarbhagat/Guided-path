@@ -443,6 +443,108 @@ def _generate_with_groq(description, app_config, logger):
     return parsed, model
 
 
+# ── Flow suggestion prompt & helpers ──────────────────────────
+
+SUGGEST_PROMPT = """You are a support flow matching engine. Given a customer issue description and a list of published support flows, identify the best matching flow(s).
+
+Return ONLY a valid JSON object with this exact structure (no markdown, no explanation):
+{
+  "no_match": false,
+  "top_match": {
+    "flow_id": "<exact flow_id from the flows list>",
+    "flow_name": "<exact flow_name from the flows list>",
+    "active_version_id": "<exact active_version_id from the flows list>",
+    "confidence": 0.92,
+    "reasoning": "One or two sentences explaining specifically why this flow is the best match for this issue."
+  },
+  "alternatives": [
+    {
+      "flow_id": "<exact flow_id>",
+      "flow_name": "<exact flow_name>",
+      "active_version_id": "<exact active_version_id>",
+      "confidence": 0.65,
+      "reasoning": "Brief specific reason this flow could also apply."
+    }
+  ]
+}
+
+Rules:
+- confidence is a float between 0.0 and 1.0 representing how well the flow matches the issue
+- Set no_match to true and top_match to null if no flow has a confidence >= 0.40
+- alternatives should contain up to 2 other relevant flows with confidence >= 0.30, excluding the top_match
+- If no alternatives exist, return "alternatives": []
+- ONLY use flow_id and active_version_id values that appear EXACTLY in the provided flows list — never invent or modify IDs
+- reasoning must be specific to the issue — never use generic phrases like "this flow handles this type of issue"
+- Consider flow name, description, category, and tags when scoring relevance
+- Return ONLY the JSON object. No markdown fences. No preamble. No explanation."""
+
+
+def _suggest_with_groq(issue, flows_context, app_config, logger):
+    """Use Groq to match an issue against published flows and return ranked suggestions."""
+    if not GROQ_AVAILABLE:
+        raise RuntimeError("groq not installed. Run: pip install groq")
+    api_key = app_config.get("GROQ_API_KEY")
+    if not api_key:
+        raise RuntimeError("GROQ_API_KEY not configured. Add it to your .env file.")
+
+    model = app_config.get("GROQ_MODEL", "llama-3.3-70b-versatile")
+    client = _Groq(api_key=api_key)
+
+    prompt = (
+        f"Customer issue:\n{issue}\n\n"
+        f"Available published flows:\n{flows_context}\n\n"
+        "Return the best matching flow(s) as a JSON object following the specified format."
+    )
+
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {"role": "system", "content": SUGGEST_PROMPT},
+            {"role": "user", "content": prompt},
+        ],
+        temperature=0.1,
+        max_tokens=1024,
+        response_format={"type": "json_object"},
+    )
+    raw = (response.choices[0].message.content or "").strip()
+    logger.info("Groq suggest: model=%s, raw_len=%d", model, len(raw))
+    parsed = _parse_ai_json(raw)
+    return parsed, model
+
+
+def _suggest_with_gemini(issue, flows_context, app_config, logger):
+    """Use Gemini to match an issue against published flows and return ranked suggestions."""
+    if not GEMINI_AVAILABLE:
+        raise RuntimeError("google-genai not installed. Run: pip install google-genai")
+    api_key = app_config.get("GEMINI_API_KEY")
+    if not api_key:
+        raise RuntimeError("GEMINI_API_KEY not configured. Add it to your .env file.")
+
+    model = app_config.get("GEMINI_MODEL", "gemini-2.0-flash").replace("models/", "")
+    client = _genai.Client(api_key=api_key)
+
+    prompt = (
+        f"Customer issue:\n{issue}\n\n"
+        f"Available published flows:\n{flows_context}\n\n"
+        "Return the best matching flow(s) as a JSON object following the specified format."
+    )
+
+    response = client.models.generate_content(
+        model=model,
+        contents=prompt,
+        config=_genai_types.GenerateContentConfig(
+            system_instruction=SUGGEST_PROMPT,
+            temperature=0.1,
+            max_output_tokens=1024,
+            response_mime_type="application/json",
+        ),
+    )
+    raw = (response.text or "").strip()
+    logger.info("Gemini suggest: model=%s, raw_len=%d", model, len(raw))
+    parsed = _parse_ai_json(raw)
+    return parsed, model
+
+
 # ── Routes ─────────────────────────────────────────────────────
 
 @ai_bp.get("/providers")

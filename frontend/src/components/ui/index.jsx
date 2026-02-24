@@ -15,9 +15,9 @@ export function ToastContainer({ toasts }) {
 
 function Toast({ toast: t }) {
   const colors = {
-    error: { bg: '#fef2f2', border: '#fca5a5', text: '#dc2626', icon: '✕' },
-    warn:  { bg: '#fffbeb', border: '#fde68a', text: '#b45309', icon: '⚠' },
-    success: { bg: '#f0fdf4', border: '#86efac', text: '#16a34a', icon: '✓' },
+    error:   { bg: 'rgba(242,92,92,0.12)',  border: 'rgba(242,92,92,0.35)',  text: '#f87171', icon: '✕' },
+    warn:    { bg: 'rgba(245,200,66,0.12)', border: 'rgba(245,200,66,0.35)', text: '#fbbf24', icon: '⚠' },
+    success: { bg: 'rgba(62,207,142,0.12)', border: 'rgba(62,207,142,0.35)', text: '#3ecf8e', icon: '✓' },
   }
   const c = colors[t.type] || colors.success
 
@@ -150,7 +150,7 @@ export function FilterBtn({ label, value, current, onChange }) {
       style={{
         padding: '5px 12px', borderRadius: '5px', fontSize: '12px',
         border: `1px solid ${active ? 'var(--accent)' : 'var(--border)'}`,
-        background: active ? '#eff6ff' : 'var(--surface2)',
+        background: active ? 'rgba(79,110,247,0.15)' : 'var(--surface2)',
         color: active ? 'var(--accent2)' : 'var(--text3)',
         transition: 'all 0.15s',
       }}>
